@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import altair as alt
 from dotenv import load_dotenv
 from supabase import create_client
 import os
@@ -7,81 +8,96 @@ import os
 load_dotenv()
 
 st.set_page_config(
-    page_title="MF Industry Dashboard",
+    page_title="MF Industry",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+# --- Supabase ---
 
 @st.cache_resource
 def get_supabase():
     return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_ANON_KEY"])
 
 
-@st.cache_data(ttl=3600)
-def load_monthly_data():
+def fetch_all(table_name, order_col, desc=True):
+    """Fetch all rows from a Supabase table, paginating past the 1000-row limit."""
     supabase = get_supabase()
-    result = (
-        supabase.table("amfi_monthly_detailed")
-        .select("*")
-        .order("report_month", desc=True)
-        .execute()
-    )
-    df = pd.DataFrame(result.data)
+    all_data = []
+    page_size = 1000
+    offset = 0
+    while True:
+        q = supabase.table(table_name).select("*").order(order_col, desc=desc)
+        q = q.range(offset, offset + page_size - 1)
+        result = q.execute()
+        all_data.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        offset += page_size
+    return all_data
+
+
+# --- Data loaders ---
+
+@st.cache_data(ttl=3600)
+def load_monthly():
+    data = fetch_all("amfi_monthly_detailed", "report_month")
+    df = pd.DataFrame(data)
     df["report_month"] = pd.to_datetime(df["report_month"])
-    for col in ["aum_cr", "net_flow_cr", "funds_mobilized_cr", "redemption_cr"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    for col in ["aum_cr", "net_flow_cr", "funds_mobilized_cr", "redemption_cr", "avg_aum_cr"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    for col in ["num_folios", "num_schemes"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
 
 @st.cache_data(ttl=3600)
-def load_qaaum_data():
-    supabase = get_supabase()
-    result = (
-        supabase.table("qaaum_fundwise")
-        .select("*")
-        .order("period_start", desc=True)
-        .execute()
-    )
-    df = pd.DataFrame(result.data)
+def load_qaaum():
+    data = fetch_all("qaaum_fundwise", "period_start")
+    df = pd.DataFrame(data)
     df["period_start"] = pd.to_datetime(df["period_start"])
-    df["aaum_total_cr"] = pd.to_numeric(df["aaum_total_cr"], errors="coerce")
+    for col in ["aaum_total_cr", "aaum_excl_cr", "aaum_fof_cr"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
 
 @st.cache_data(ttl=3600)
-def load_industry_metrics():
-    supabase = get_supabase()
-    result = (
-        supabase.table("mf_industry_metrics")
-        .select("*")
-        .order("period_date", desc=True)
-        .execute()
-    )
-    df = pd.DataFrame(result.data)
+def load_metrics():
+    data = fetch_all("mf_industry_metrics", "period_date")
+    df = pd.DataFrame(data)
     df["period_date"] = pd.to_datetime(df["period_date"])
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
     return df
 
 
+@st.cache_data(ttl=3600)
+def load_state_data():
+    supabase = get_supabase()
+    result = supabase.table("mf_state_data").select("*").execute()
+    df = pd.DataFrame(result.data)
+    df["value_pct"] = pd.to_numeric(df["value_pct"], errors="coerce")
+    return df
+
+
+# --- Formatting ---
+
 def fmt_cr(val):
-    """Format crore values as readable lakhs crore / thousands crore."""
     if pd.isna(val):
         return "—"
     if abs(val) >= 100000:
-        return f"{val / 100000:,.1f}L Cr"
+        return f"₹{val / 100000:,.1f}L Cr"
     if abs(val) >= 1000:
-        return f"{val / 1000:,.1f}K Cr"
-    return f"{val:,.0f} Cr"
+        return f"₹{val / 1000:,.1f}K Cr"
+    return f"₹{val:,.0f} Cr"
 
 
-def fmt_num(val):
-    """Format large numbers with L/K suffixes."""
+def fmt_cr_short(val):
     if pd.isna(val):
         return "—"
-    if abs(val) >= 10000000:
-        return f"{val / 10000000:,.1f} Cr"
     if abs(val) >= 100000:
         return f"{val / 100000:,.1f}L"
     if abs(val) >= 1000:
@@ -89,206 +105,755 @@ def fmt_num(val):
     return f"{val:,.0f}"
 
 
+def fmt_num(val):
+    if pd.isna(val):
+        return "—"
+    if abs(val) >= 10000000:
+        return f"{val / 10000000:,.2f} Cr"
+    if abs(val) >= 100000:
+        return f"{val / 100000:,.1f}L"
+    if abs(val) >= 1000:
+        return f"{val / 1000:,.1f}K"
+    return f"{val:,.0f}"
+
+
+def fmt_pct(val):
+    if pd.isna(val):
+        return "—"
+    return f"{val:+.1f}%"
+
+
+def pct_change(new, old):
+    if pd.isna(new) or pd.isna(old) or old == 0:
+        return None
+    return ((new / old) - 1) * 100
+
+
+def y_axis_lakhs_cr(title=""):
+    return alt.Axis(
+        title=title,
+        format="~s",
+        labelExpr="datum.value >= 100000 ? format(datum.value / 100000, '.0f') + 'L Cr' : datum.value >= 1000 ? format(datum.value / 1000, '.0f') + 'K Cr' : format(datum.value, '.0f') + ' Cr'"
+    )
+
+
+GROUPS = ["Equity", "Debt", "Hybrid", "Solution Oriented", "Other"]
+GROUP_COLORS = {
+    "Equity": "#4ade80",
+    "Debt": "#60a5fa",
+    "Hybrid": "#f59e0b",
+    "Solution Oriented": "#a78bfa",
+    "Other": "#94a3b8",
+}
+
+
 # --- Sidebar ---
+
 st.sidebar.title("MF Industry")
-st.sidebar.caption("Indian Mutual Fund Industry Dashboard")
+st.sidebar.caption("Indian Mutual Fund Industry")
 
 page = st.sidebar.radio(
     "Navigate",
-    ["Pulse", "Flows", "Categories", "QAAUM Rankings", "Data Explorer"],
+    ["Industry Pulse", "Flows", "Categories", "Market Share", "Industry Story", "Geography", "Data Explorer"],
     label_visibility="collapsed",
 )
 
-# --- Load data ---
-df = load_monthly_data()
+# --- Load core data ---
+
+df = load_monthly()
 latest_month = df["report_month"].max()
 prev_month = latest_month - pd.DateOffset(months=1)
 year_ago = latest_month - pd.DateOffset(months=12)
 
-# --- Pages ---
 
-if page == "Pulse":
+# =====================================================================
+# PAGE: INDUSTRY PULSE
+# =====================================================================
+
+if page == "Industry Pulse":
     st.title("Industry Pulse")
-    st.caption(f"Latest data: {latest_month.strftime('%B %Y')}")
+    st.caption(f"Data as of {latest_month.strftime('%B %Y')}")
 
-    # Grand total row for latest month
     gt = df[(df["report_month"] == latest_month) & (df["category"] == "Grand Total")]
     gt_prev = df[(df["report_month"] == prev_month) & (df["category"] == "Grand Total")]
     gt_yoy = df[(df["report_month"] == year_ago) & (df["category"] == "Grand Total")]
 
     if not gt.empty:
-        row = gt.iloc[0]
-        col1, col2, col3, col4 = st.columns(4)
+        r = gt.iloc[0]
+        rp = gt_prev.iloc[0] if not gt_prev.empty else None
+        ry = gt_yoy.iloc[0] if not gt_yoy.empty else None
 
-        aum_now = row["aum_cr"]
-        aum_prev = gt_prev.iloc[0]["aum_cr"] if not gt_prev.empty else None
-        aum_yoy = gt_yoy.iloc[0]["aum_cr"] if not gt_yoy.empty else None
+        # KPI row
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Total AUM", fmt_cr(r["aum_cr"]),
+                   delta=f"{pct_change(r['aum_cr'], rp['aum_cr']):.1f}% MoM" if rp is not None else None)
+        c2.metric("YoY Growth", f"{pct_change(r['aum_cr'], ry['aum_cr']):.1f}%" if ry is not None else "—")
+        c3.metric("Net Flows", fmt_cr(r["net_flow_cr"]),
+                   delta=f"{fmt_cr_short(rp['net_flow_cr'])} Cr prev" if rp is not None else None)
+        c4.metric("Folios", fmt_num(r["num_folios"]),
+                   delta=f"{fmt_num(r['num_folios'] - rp['num_folios'])} new" if rp is not None and not pd.isna(rp['num_folios']) else None)
+        c5.metric("Schemes", fmt_num(r["num_schemes"]))
 
-        col1.metric(
-            "Total AUM",
-            fmt_cr(aum_now),
-            delta=f"{((aum_now / aum_prev) - 1) * 100:.1f}% MoM" if aum_prev else None,
-        )
-        col2.metric(
-            "Net Flows",
-            fmt_cr(row["net_flow_cr"]),
-            delta=f"{fmt_cr(gt_prev.iloc[0]['net_flow_cr'])} prev" if not gt_prev.empty else None,
-        )
-        col3.metric("Folios", fmt_num(row["num_folios"]))
-        col4.metric("Schemes", fmt_num(row["num_schemes"]))
-
-    # AUM trend chart
+    # AUM trend — Altair with proper axis
     st.subheader("AUM Trend")
     aum_trend = (
         df[df["category"] == "Grand Total"]
         .sort_values("report_month")[["report_month", "aum_cr"]]
-        .set_index("report_month")
+        .rename(columns={"report_month": "Month", "aum_cr": "AUM"})
     )
-    st.area_chart(aum_trend, y="aum_cr", color="#4ade80", use_container_width=True)
+    chart = alt.Chart(aum_trend).mark_area(
+        color="#4ade80", opacity=0.6, line={"color": "#4ade80"}
+    ).encode(
+        x=alt.X("Month:T", title=""),
+        y=alt.Y("AUM:Q", axis=y_axis_lakhs_cr()),
+        tooltip=[
+            alt.Tooltip("Month:T", format="%B %Y"),
+            alt.Tooltip("AUM:Q", format=",.0f", title="AUM (Cr)"),
+        ],
+    ).properties(height=350)
+    st.altair_chart(chart, use_container_width=True)
 
-    # Group breakdown
+    # Group breakdown with shares — aggregate from sub-categories
     st.subheader("AUM by Group")
-    groups = ["Debt Schemes", "Equity Schemes", "Hybrid Schemes", "Solution Oriented Schemes", "Other Schemes"]
-    group_data = df[
+    open_ended = df[
         (df["report_month"] == latest_month)
-        & (df["category"].isin(groups))
-    ][["category", "aum_cr", "net_flow_cr", "num_folios"]].sort_values("aum_cr", ascending=False)
-    group_data.columns = ["Group", "AUM (Cr)", "Net Flow (Cr)", "Folios"]
-    st.dataframe(group_data, use_container_width=True, hide_index=True)
+        & (df["section"] == "Open Ended")
+        & (df["group"].isin(GROUPS))
+        & (~df["category"].isin(["Grand Total"]))
+    ]
+    group_latest = open_ended.groupby("group").agg(
+        aum_cr=("aum_cr", "sum"), net_flow_cr=("net_flow_cr", "sum"), num_folios=("num_folios", "sum"),
+    ).reset_index().rename(columns={"group": "category"})
+    total_aum = group_latest["aum_cr"].sum()
+    group_latest["share"] = (group_latest["aum_cr"] / total_aum * 100).round(1)
 
+    # YoY growth per group
+    open_yoy = df[
+        (df["report_month"] == year_ago)
+        & (df["section"] == "Open Ended")
+        & (df["group"].isin(GROUPS))
+    ]
+    group_yoy = open_yoy.groupby("group")["aum_cr"].sum().reset_index().rename(columns={"group": "category", "aum_cr": "aum_yoy"})
+    group_latest = group_latest.merge(group_yoy, on="category", how="left")
+    group_latest["yoy_growth"] = ((group_latest["aum_cr"] / group_latest["aum_yoy"] - 1) * 100).round(1)
+
+    display = group_latest.sort_values("aum_cr", ascending=False)[
+        ["category", "aum_cr", "share", "net_flow_cr", "yoy_growth", "num_folios"]
+    ].copy()
+    display.columns = ["Group", "AUM (Cr)", "Share %", "Net Flow (Cr)", "YoY Growth %", "Folios"]
+    st.dataframe(
+        display.style.format({
+            "AUM (Cr)": "{:,.0f}",
+            "Share %": "{:.1f}%",
+            "Net Flow (Cr)": "{:,.0f}",
+            "YoY Growth %": "{:+.1f}%",
+            "Folios": "{:,.0f}",
+        }),
+        use_container_width=True, hide_index=True,
+    )
+
+    # Group composition over time
+    st.subheader("Group Composition Over Time")
+    open_all = df[(df["section"] == "Open Ended") & (df["group"].isin(GROUPS))]
+    comp = open_all.groupby(["report_month", "group"])["aum_cr"].sum().reset_index().rename(columns={"group": "category"})
+    monthly_totals = comp.groupby("report_month")["aum_cr"].sum().rename("total")
+    comp = comp.merge(monthly_totals, on="report_month")
+    comp["share"] = (comp["aum_cr"] / comp["total"] * 100).round(1)
+
+    comp_chart = alt.Chart(comp).mark_area().encode(
+        x=alt.X("report_month:T", title=""),
+        y=alt.Y("share:Q", stack="normalize", title="Share of AUM", axis=alt.Axis(format="%")),
+        color=alt.Color("category:N", title="Group",
+                        scale=alt.Scale(domain=list(GROUP_COLORS.keys()), range=list(GROUP_COLORS.values()))),
+        tooltip=[
+            alt.Tooltip("report_month:T", format="%B %Y", title="Month"),
+            alt.Tooltip("category:N", title="Group"),
+            alt.Tooltip("share:Q", format=".1f", title="Share %"),
+        ],
+    ).properties(height=300)
+    st.altair_chart(comp_chart, use_container_width=True)
+
+
+# =====================================================================
+# PAGE: FLOWS
+# =====================================================================
 
 elif page == "Flows":
     st.title("Flow Tracker")
-    st.caption(f"Latest data: {latest_month.strftime('%B %Y')}")
+    st.caption(f"Data as of {latest_month.strftime('%B %Y')}")
 
-    # Time range selector
-    months_available = sorted(df["report_month"].unique(), reverse=True)
-    n_months = st.slider("Show last N months", 3, 24, 12)
+    n_months = st.slider("Trailing months", 6, 84, 24, key="flow_months")
     cutoff = latest_month - pd.DateOffset(months=n_months)
 
-    groups = ["Debt Schemes", "Equity Schemes", "Hybrid Schemes", "Solution Oriented Schemes", "Other Schemes"]
-    flow_df = df[
-        (df["report_month"] > cutoff)
-        & (df["category"].isin(groups))
-    ][["report_month", "category", "net_flow_cr"]].copy()
-    flow_df["month"] = flow_df["report_month"].dt.strftime("%Y-%m")
+    # Net flows by group — aggregate from sub-categories
+    st.subheader("Net Flows by Group")
+    flow_raw = df[
+        (df["report_month"] > cutoff) & (df["section"] == "Open Ended") & (df["group"].isin(GROUPS))
+    ]
+    flow_df = flow_raw.groupby(["report_month", "group"])["net_flow_cr"].sum().reset_index().rename(columns={"group": "category"})
 
-    # Pivot for chart
-    pivot = flow_df.pivot_table(index="month", columns="category", values="net_flow_cr", aggfunc="sum").fillna(0)
-    pivot = pivot.sort_index()
+    flow_chart = alt.Chart(flow_df).mark_bar().encode(
+        x=alt.X("yearmonth(report_month):T", title=""),
+        y=alt.Y("net_flow_cr:Q", axis=y_axis_lakhs_cr("Net Flow")),
+        color=alt.Color("category:N", title="Group",
+                        scale=alt.Scale(domain=list(GROUP_COLORS.keys()), range=list(GROUP_COLORS.values()))),
+        tooltip=[
+            alt.Tooltip("report_month:T", format="%B %Y"),
+            alt.Tooltip("category:N", title="Group"),
+            alt.Tooltip("net_flow_cr:Q", format=",.0f", title="Net Flow (Cr)"),
+        ],
+    ).properties(height=400)
+    st.altair_chart(flow_chart, use_container_width=True)
 
-    st.bar_chart(pivot, use_container_width=True)
-
-    # Net flow summary table
-    st.subheader("Net Flows by Group — Latest Month")
-    latest_flows = flow_df[flow_df["report_month"] == latest_month][["category", "net_flow_cr"]].sort_values(
-        "net_flow_cr", ascending=False
+    # Flow summary — latest month
+    st.subheader("Latest Month Summary")
+    latest_flow_raw = df[
+        (df["report_month"] == latest_month) & (df["section"] == "Open Ended") & (df["group"].isin(GROUPS))
+    ]
+    latest_flow = latest_flow_raw.groupby("group").agg(
+        funds_mobilized_cr=("funds_mobilized_cr", "sum"),
+        redemption_cr=("redemption_cr", "sum"),
+        net_flow_cr=("net_flow_cr", "sum"),
+    ).reset_index().rename(columns={"group": "category"})
+    latest_flow["redemption_ratio"] = (latest_flow["redemption_cr"] / latest_flow["funds_mobilized_cr"] * 100).round(1)
+    latest_flow = latest_flow.sort_values("net_flow_cr", ascending=False)
+    latest_flow.columns = ["Group", "Gross Sales (Cr)", "Redemptions (Cr)", "Net Flow (Cr)", "Redemption Ratio %"]
+    st.dataframe(
+        latest_flow.style.format({
+            "Gross Sales (Cr)": "{:,.0f}",
+            "Redemptions (Cr)": "{:,.0f}",
+            "Net Flow (Cr)": "{:,.0f}",
+            "Redemption Ratio %": "{:.1f}%",
+        }),
+        use_container_width=True, hide_index=True,
     )
-    latest_flows.columns = ["Group", "Net Flow (Cr)"]
-    st.dataframe(latest_flows, use_container_width=True, hide_index=True)
 
+    # Category-level flow momentum — top gainers and losers
+    st.subheader("Category Flow Momentum — Top Gainers & Losers")
+    cat_flows = df[
+        (df["report_month"] == latest_month)
+        & (df["section"] == "Open Ended")
+        & (~df["category"].isin(GROUPS + ["Grand Total", "Total A-Open ended Schemes"]))
+    ][["category", "net_flow_cr", "aum_cr"]].copy()
+    cat_flows["flow_to_aum"] = (cat_flows["net_flow_cr"] / cat_flows["aum_cr"] * 100).round(2)
+    cat_flows = cat_flows.sort_values("net_flow_cr", ascending=False)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Top 5 Inflows**")
+        top5 = cat_flows.head(5)[["category", "net_flow_cr", "flow_to_aum"]].copy()
+        top5.columns = ["Category", "Net Flow (Cr)", "Flow/AUM %"]
+        st.dataframe(top5.style.format({"Net Flow (Cr)": "{:,.0f}", "Flow/AUM %": "{:.2f}%"}),
+                     use_container_width=True, hide_index=True)
+    with col2:
+        st.markdown("**Top 5 Outflows**")
+        bot5 = cat_flows.tail(5).sort_values("net_flow_cr")[["category", "net_flow_cr", "flow_to_aum"]].copy()
+        bot5.columns = ["Category", "Net Flow (Cr)", "Flow/AUM %"]
+        st.dataframe(bot5.style.format({"Net Flow (Cr)": "{:,.0f}", "Flow/AUM %": "{:.2f}%"}),
+                     use_container_width=True, hide_index=True)
+
+
+# =====================================================================
+# PAGE: CATEGORIES
+# =====================================================================
 
 elif page == "Categories":
     st.title("Category Deep Dive")
-    st.caption(f"Latest data: {latest_month.strftime('%B %Y')}")
+    st.caption(f"Data as of {latest_month.strftime('%B %Y')}")
 
-    # Group filter
-    groups = ["Debt Schemes", "Equity Schemes", "Hybrid Schemes", "Solution Oriented Schemes", "Other Schemes"]
-    selected_group = st.selectbox("Select Group", groups)
+    selected_group = st.selectbox("Select Group", GROUPS)
 
-    # Map group name to the group column value
-    group_map = {
-        "Debt Schemes": "Debt Schemes",
-        "Equity Schemes": "Equity Schemes",
-        "Hybrid Schemes": "Hybrid Schemes",
-        "Solution Oriented Schemes": "Solution Oriented Schemes",
-        "Other Schemes": "Other Schemes",
-    }
-
-    # Get categories within this group (exclude the group total row)
+    # Sub-categories in this group
     cat_df = df[
         (df["report_month"] == latest_month)
-        & (df["group"] == group_map[selected_group])
-        & (~df["category"].isin(groups + ["Grand Total"]))
-        & (df["section"] == "Open Ended Schemes")
-    ][["category", "aum_cr", "net_flow_cr", "num_folios", "num_schemes"]].sort_values("aum_cr", ascending=False)
+        & (df["group"] == selected_group)
+        & (~df["category"].isin(GROUPS + ["Grand Total", "Total A-Open ended Schemes", "Close Ended Schemes Total", "Interval Schemes Total"]))
+        & (df["section"] == "Open Ended")
+    ][["category", "aum_cr", "net_flow_cr", "num_folios", "num_schemes"]].copy()
 
     if cat_df.empty:
-        st.info("No sub-category data available for this group.")
+        st.info("No sub-category data for this group.")
     else:
-        cat_df.columns = ["Category", "AUM (Cr)", "Net Flow (Cr)", "Folios", "Schemes"]
-        st.dataframe(cat_df, use_container_width=True, hide_index=True)
+        # Compute share within group
+        group_aum = cat_df["aum_cr"].sum()
+        cat_df["share"] = (cat_df["aum_cr"] / group_aum * 100).round(1)
 
-        # AUM pie chart
-        st.subheader("AUM Composition")
-        chart_df = cat_df.set_index("Category")[["AUM (Cr)"]]
-        st.bar_chart(chart_df, use_container_width=True, horizontal=True)
+        # YoY
+        cat_yoy = df[
+            (df["report_month"] == year_ago)
+            & (df["group"] == selected_group)
+            & (df["section"] == "Open Ended")
+        ][["category", "aum_cr"]].rename(columns={"aum_cr": "aum_yoy"})
+        cat_df = cat_df.merge(cat_yoy, on="category", how="left")
+        cat_df["yoy"] = ((cat_df["aum_cr"] / cat_df["aum_yoy"] - 1) * 100).round(1)
+        cat_df = cat_df.sort_values("aum_cr", ascending=False)
+
+        display = cat_df[["category", "aum_cr", "share", "net_flow_cr", "yoy", "num_folios", "num_schemes"]].copy()
+        display.columns = ["Category", "AUM (Cr)", "Share %", "Net Flow (Cr)", "YoY %", "Folios", "Schemes"]
+        st.dataframe(
+            display.style.format({
+                "AUM (Cr)": "{:,.0f}", "Share %": "{:.1f}%", "Net Flow (Cr)": "{:,.0f}",
+                "YoY %": "{:+.1f}%", "Folios": "{:,.0f}", "Schemes": "{:,.0f}",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+
+        # Category trend
+        st.subheader("Category AUM Trend")
+        selected_cat = st.selectbox("Select Category", cat_df["category"].tolist())
+        cat_trend = (
+            df[(df["category"] == selected_cat) & (df["section"] == "Open Ended")]
+            .sort_values("report_month")[["report_month", "aum_cr", "net_flow_cr"]]
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            aum_chart = alt.Chart(cat_trend).mark_area(color="#4ade80", opacity=0.5, line={"color": "#4ade80"}).encode(
+                x=alt.X("report_month:T", title=""),
+                y=alt.Y("aum_cr:Q", axis=y_axis_lakhs_cr("AUM")),
+                tooltip=[alt.Tooltip("report_month:T", format="%B %Y"), alt.Tooltip("aum_cr:Q", format=",.0f", title="AUM (Cr)")],
+            ).properties(height=250, title="AUM")
+            st.altair_chart(aum_chart, use_container_width=True)
+        with col2:
+            flow_chart = alt.Chart(cat_trend).mark_bar(color="#60a5fa").encode(
+                x=alt.X("report_month:T", title=""),
+                y=alt.Y("net_flow_cr:Q", axis=y_axis_lakhs_cr("Net Flow")),
+                tooltip=[alt.Tooltip("report_month:T", format="%B %Y"), alt.Tooltip("net_flow_cr:Q", format=",.0f", title="Net Flow (Cr)")],
+            ).properties(height=250, title="Net Flows")
+            st.altair_chart(flow_chart, use_container_width=True)
+
+        # Share of total industry AUM over time
+        st.subheader(f"{selected_cat} — Share of Industry AUM")
+        cat_share = df[
+            (df["category"] == selected_cat) & (df["section"] == "Open Ended")
+        ][["report_month", "aum_cr"]].copy()
+        gt_aum = df[df["category"] == "Grand Total"][["report_month", "aum_cr"]].rename(columns={"aum_cr": "total_aum"})
+        cat_share = cat_share.merge(gt_aum, on="report_month")
+        cat_share["share"] = (cat_share["aum_cr"] / cat_share["total_aum"] * 100).round(2)
+        share_chart = alt.Chart(cat_share).mark_line(color="#f59e0b", strokeWidth=2).encode(
+            x=alt.X("report_month:T", title=""),
+            y=alt.Y("share:Q", title="Share of Industry %", scale=alt.Scale(zero=False)),
+            tooltip=[alt.Tooltip("report_month:T", format="%B %Y"), alt.Tooltip("share:Q", format=".2f", title="Share %")],
+        ).properties(height=200)
+        st.altair_chart(share_chart, use_container_width=True)
 
 
-elif page == "QAAUM Rankings":
-    st.title("QAAUM — Fund House Rankings")
+# =====================================================================
+# PAGE: MARKET SHARE
+# =====================================================================
 
-    qdf = load_qaaum_data()
+elif page == "Market Share":
+    st.title("Market Share — Fund Houses")
+
+    qdf = load_qaaum()
     latest_period = qdf["period_start"].max()
-    st.caption(f"Latest period: {latest_period.strftime('%B %Y')}")
+    st.caption(f"QAAUM data as of {latest_period.strftime('%B %Y')}")
 
-    # Top N selector
-    top_n = st.slider("Show top N fund houses", 5, 30, 15)
+    # Top N rankings
+    top_n = st.slider("Top fund houses", 5, 30, 15)
+    latest_q = qdf[qdf["period_start"] == latest_period].sort_values("aaum_total_cr", ascending=False)
+    industry_total = latest_q["aaum_total_cr"].sum()
 
-    latest_qaaum = (
-        qdf[qdf["period_start"] == latest_period]
-        .sort_values("aaum_total_cr", ascending=False)
-        .head(top_n)[["fund_house", "aaum_total_cr"]]
+    top = latest_q.head(top_n).copy()
+    top["share"] = (top["aaum_total_cr"] / industry_total * 100).round(2)
+
+    # Previous period for share change
+    periods_sorted = sorted(qdf["period_start"].unique())
+    if len(periods_sorted) >= 2:
+        prev_period = periods_sorted[-2]
+        prev_q = qdf[qdf["period_start"] == prev_period].set_index("fund_house")["aaum_total_cr"]
+        prev_total = prev_q.sum()
+        top["prev_share"] = top["fund_house"].map(lambda x: (prev_q.get(x, 0) / prev_total * 100) if prev_total > 0 else 0).round(2)
+        top["share_change"] = (top["share"] - top["prev_share"]).round(2)
+    else:
+        top["share_change"] = 0
+
+    # Bar chart
+    bar = alt.Chart(top).mark_bar(color="#4ade80").encode(
+        x=alt.X("aaum_total_cr:Q", axis=y_axis_lakhs_cr("AAUM"), title="AAUM"),
+        y=alt.Y("fund_house:N", sort="-x", title=""),
+        tooltip=[
+            alt.Tooltip("fund_house:N", title="Fund House"),
+            alt.Tooltip("aaum_total_cr:Q", format=",.0f", title="AAUM (Cr)"),
+            alt.Tooltip("share:Q", format=".2f", title="Market Share %"),
+        ],
+    ).properties(height=top_n * 28 + 50)
+    st.altair_chart(bar, use_container_width=True)
+
+    # Table
+    display_q = top[["fund_house", "aaum_total_cr", "share", "share_change"]].copy()
+    display_q.columns = ["Fund House", "AAUM (Cr)", "Share %", "Change (bps)"]
+    display_q["Change (bps)"] = (display_q["Change (bps)"] * 100).round(0)
+    st.dataframe(
+        display_q.style.format({
+            "AAUM (Cr)": "{:,.0f}", "Share %": "{:.2f}%", "Change (bps)": "{:+.0f}",
+        }),
+        use_container_width=True, hide_index=True,
     )
-    latest_qaaum.columns = ["Fund House", "AAUM (Cr)"]
 
-    st.bar_chart(latest_qaaum.set_index("Fund House"), use_container_width=True)
-    st.dataframe(latest_qaaum, use_container_width=True, hide_index=True)
+    # Concentration — top 5 and top 10 over time
+    st.subheader("Industry Concentration")
+    concentration = []
+    for period in sorted(qdf["period_start"].unique()):
+        period_data = qdf[qdf["period_start"] == period].sort_values("aaum_total_cr", ascending=False)
+        total = period_data["aaum_total_cr"].sum()
+        if total > 0:
+            top5 = period_data.head(5)["aaum_total_cr"].sum() / total * 100
+            top10 = period_data.head(10)["aaum_total_cr"].sum() / total * 100
+            concentration.append({"period": period, "Top 5": top5, "Top 10": top10})
+    conc_df = pd.DataFrame(concentration)
+    conc_melt = conc_df.melt(id_vars="period", var_name="Metric", value_name="Share %")
 
-    # Trend for selected fund house
-    st.subheader("Fund House Trend")
+    conc_chart = alt.Chart(conc_melt).mark_line(strokeWidth=2).encode(
+        x=alt.X("period:T", title=""),
+        y=alt.Y("Share %:Q", title="Share of Industry AUM %", scale=alt.Scale(zero=False)),
+        color=alt.Color("Metric:N", scale=alt.Scale(domain=["Top 5", "Top 10"], range=["#4ade80", "#60a5fa"])),
+        tooltip=[
+            alt.Tooltip("period:T", format="%B %Y"),
+            alt.Tooltip("Metric:N"),
+            alt.Tooltip("Share %:Q", format=".1f"),
+        ],
+    ).properties(height=300)
+    st.altair_chart(conc_chart, use_container_width=True)
+
+    # Fund house trend comparison
+    st.subheader("Compare Fund Houses")
     all_houses = sorted(qdf["fund_house"].unique())
-    selected_house = st.selectbox("Select Fund House", all_houses, index=all_houses.index("HDFC Mutual Fund") if "HDFC Mutual Fund" in all_houses else 0)
+    defaults = ["HDFC Mutual Fund", "SBI Mutual Fund", "ICICI Prudential Mutual Fund"]
+    defaults = [h for h in defaults if h in all_houses]
+    selected_houses = st.multiselect("Select fund houses", all_houses, default=defaults)
 
-    house_trend = (
-        qdf[qdf["fund_house"] == selected_house]
-        .sort_values("period_start")[["period_start", "aaum_total_cr"]]
-        .set_index("period_start")
-    )
-    st.line_chart(house_trend, use_container_width=True)
+    if selected_houses:
+        compare = qdf[qdf["fund_house"].isin(selected_houses)].sort_values("period_start")
+        compare_chart = alt.Chart(compare).mark_line(strokeWidth=2).encode(
+            x=alt.X("period_start:T", title=""),
+            y=alt.Y("aaum_total_cr:Q", axis=y_axis_lakhs_cr("AAUM")),
+            color=alt.Color("fund_house:N", title="Fund House"),
+            tooltip=[
+                alt.Tooltip("period_start:T", format="%B %Y"),
+                alt.Tooltip("fund_house:N"),
+                alt.Tooltip("aaum_total_cr:Q", format=",.0f", title="AAUM (Cr)"),
+            ],
+        ).properties(height=350)
+        st.altair_chart(compare_chart, use_container_width=True)
 
+
+# =====================================================================
+# PAGE: INDUSTRY STORY
+# =====================================================================
+
+elif page == "Industry Story":
+    st.title("Industry Story")
+    st.caption("Structural trends shaping the Indian mutual fund industry")
+
+    metrics = load_metrics()
+
+    tab_names = ["AUM & Macro", "SIP", "Passive Funds", "Digital", "Women in MF", "Investors", "Global"]
+    tabs = st.tabs(tab_names)
+
+    # --- AUM & Macro ---
+    with tabs[0]:
+        st.subheader("AUM vs GDP")
+        aum_gdp = metrics[metrics["metric_name"] == "mf_aum_to_gdp_ratio"].sort_values("period_date")
+        if not aum_gdp.empty:
+            c = alt.Chart(aum_gdp).mark_bar(color="#4ade80").encode(
+                x=alt.X("period_date:T", title=""),
+                y=alt.Y("value:Q", title="AUM as % of GDP"),
+                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f", title="%")],
+            ).properties(height=250)
+            st.altair_chart(c, use_container_width=True)
+
+        st.subheader("AMC Concentration")
+        col1, col2 = st.columns(2)
+        with col1:
+            top5_conc = metrics[metrics["metric_name"] == "amc_concentration_top5"].sort_values("period_date")
+            if not top5_conc.empty:
+                c = alt.Chart(top5_conc).mark_line(color="#4ade80", strokeWidth=2).encode(
+                    x=alt.X("period_date:T", title=""), y=alt.Y("value:Q", title="Top 5 Share %", scale=alt.Scale(zero=False)),
+                    tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
+                ).properties(height=200, title="Top 5 AMCs")
+                st.altair_chart(c, use_container_width=True)
+        with col2:
+            top10_conc = metrics[metrics["metric_name"] == "amc_concentration_top10"].sort_values("period_date")
+            if not top10_conc.empty:
+                c = alt.Chart(top10_conc).mark_line(color="#60a5fa", strokeWidth=2).encode(
+                    x=alt.X("period_date:T", title=""), y=alt.Y("value:Q", title="Top 10 Share %", scale=alt.Scale(zero=False)),
+                    tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
+                ).properties(height=200, title="Top 10 AMCs")
+                st.altair_chart(c, use_container_width=True)
+
+        st.subheader("Macro Context")
+        macro_metrics = ["gdp_growth_rate", "gross_domestic_savings_rate", "gdp_per_capita_nominal"]
+        for m in macro_metrics:
+            mdata = metrics[metrics["metric_name"] == m].sort_values("period_date")
+            if not mdata.empty:
+                label = m.replace("_", " ").title()
+                unit = mdata.iloc[0]["unit"] if "unit" in mdata.columns else ""
+                c = alt.Chart(mdata).mark_line(color="#f59e0b", strokeWidth=2).encode(
+                    x=alt.X("period_date:T", title=""),
+                    y=alt.Y("value:Q", title=f"{label} ({unit})", scale=alt.Scale(zero=False)),
+                    tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
+                ).properties(height=180, title=label)
+                st.altair_chart(c, use_container_width=True)
+
+    # --- SIP ---
+    with tabs[1]:
+        st.subheader("SIP Growth")
+        sip_aum = metrics[metrics["metric_name"] == "sip_aum"].sort_values("period_date")
+        if not sip_aum.empty:
+            c = alt.Chart(sip_aum).mark_bar(color="#4ade80").encode(
+                x=alt.X("period_date:T", title=""),
+                y=alt.Y("value:Q", title="SIP AUM (L Cr)"),
+                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=",.0f")],
+            ).properties(height=250)
+            st.altair_chart(c, use_container_width=True)
+
+        sip_share = metrics[metrics["metric_name"] == "sip_aum_share_of_industry"].sort_values("period_date")
+        if not sip_share.empty:
+            c = alt.Chart(sip_share).mark_line(color="#f59e0b", strokeWidth=2).encode(
+                x=alt.X("period_date:T", title=""),
+                y=alt.Y("value:Q", title="SIP AUM as % of Industry"),
+                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
+            ).properties(height=200)
+            st.altair_chart(c, use_container_width=True)
+
+    # --- Passive Funds ---
+    with tabs[2]:
+        st.subheader("Passive Funds Rise")
+        passive_share = metrics[metrics["metric_name"] == "passive_aum_share"].sort_values("period_date")
+        if not passive_share.empty:
+            c = alt.Chart(passive_share).mark_area(color="#a78bfa", opacity=0.5, line={"color": "#a78bfa"}).encode(
+                x=alt.X("period_date:T", title=""),
+                y=alt.Y("value:Q", title="Passive Share of Industry %"),
+                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
+            ).properties(height=250)
+            st.altair_chart(c, use_container_width=True)
+
+        passive_aum = metrics[metrics["metric_name"] == "passive_aum"].sort_values("period_date")
+        if not passive_aum.empty:
+            c = alt.Chart(passive_aum).mark_bar(color="#a78bfa").encode(
+                x=alt.X("period_date:T", title=""),
+                y=alt.Y("value:Q", title="Passive AUM (L Cr)"),
+                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=",.0f")],
+            ).properties(height=250)
+            st.altair_chart(c, use_container_width=True)
+
+    # --- Digital ---
+    with tabs[3]:
+        st.subheader("Digital Adoption")
+        for m in ["digital_channel_mf_purchase", "digital_channel_sip_purchase"]:
+            mdata = metrics[metrics["metric_name"] == m].sort_values("period_date")
+            if not mdata.empty:
+                label = m.replace("_", " ").title()
+                c = alt.Chart(mdata).mark_bar(color="#60a5fa").encode(
+                    x=alt.X("period_date:T", title=""),
+                    y=alt.Y("value:Q", title="%"),
+                    tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
+                ).properties(height=200, title=label)
+                st.altair_chart(c, use_container_width=True)
+
+    # --- Women in MF ---
+    with tabs[4]:
+        st.subheader("Women in Mutual Funds")
+
+        women_aum = metrics[metrics["metric_name"] == "women_aum"].sort_values("period_date")
+        if not women_aum.empty:
+            c = alt.Chart(women_aum).mark_area(color="#f472b6", opacity=0.5, line={"color": "#f472b6"}).encode(
+                x=alt.X("period_date:T", title=""),
+                y=alt.Y("value:Q", title="Women's AUM (L Cr)"),
+                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=",.0f")],
+            ).properties(height=250)
+            st.altair_chart(c, use_container_width=True)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            w_share = metrics[metrics["metric_name"] == "women_share_individual_aum"].sort_values("period_date")
+            if not w_share.empty:
+                c = alt.Chart(w_share).mark_line(color="#f472b6", strokeWidth=2).encode(
+                    x=alt.X("period_date:T", title=""),
+                    y=alt.Y("value:Q", title="%", scale=alt.Scale(zero=False)),
+                    tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
+                ).properties(height=200, title="Women's Share of Individual AUM")
+                st.altair_chart(c, use_container_width=True)
+        with col2:
+            w_inv = metrics[metrics["metric_name"] == "women_share_unique_investors"].sort_values("period_date")
+            if not w_inv.empty:
+                c = alt.Chart(w_inv).mark_line(color="#a78bfa", strokeWidth=2).encode(
+                    x=alt.X("period_date:T", title=""),
+                    y=alt.Y("value:Q", title="%", scale=alt.Scale(zero=False)),
+                    tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
+                ).properties(height=200, title="Women's Share of Unique Investors")
+                st.altair_chart(c, use_container_width=True)
+
+        # Women SIP
+        w_sip = metrics[metrics["metric_name"] == "women_sip_aum"].sort_values("period_date")
+        if not w_sip.empty:
+            c = alt.Chart(w_sip).mark_bar(color="#f472b6").encode(
+                x=alt.X("period_date:T", title=""),
+                y=alt.Y("value:Q", title="Women SIP AUM (L Cr)"),
+                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=",.0f")],
+            ).properties(height=200)
+            st.altair_chart(c, use_container_width=True)
+
+    # --- Investors ---
+    with tabs[5]:
+        st.subheader("Investor Base")
+        uniq = metrics[metrics["metric_name"] == "unique_investors"].sort_values("period_date")
+        if not uniq.empty:
+            c = alt.Chart(uniq).mark_bar(color="#4ade80").encode(
+                x=alt.X("period_date:T", title=""),
+                y=alt.Y("value:Q", title="Unique Investors (Cr)"),
+                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".2f")],
+            ).properties(height=250)
+            st.altair_chart(c, use_container_width=True)
+
+        # B30 vs T30
+        geo = metrics[metrics["metric_name"].isin(["b30_t30_aum_share", "city_tier_aum_share"])].sort_values("period_date")
+        if not geo.empty:
+            c = alt.Chart(geo).mark_bar().encode(
+                x=alt.X("period_date:T", title=""),
+                y=alt.Y("value:Q", title="%"),
+                color=alt.Color("segment:N", title="Segment"),
+                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("segment:N"), alt.Tooltip("value:Q", format=".1f")],
+            ).properties(height=250, title="B30 vs T30 / Geographic Split")
+            st.altair_chart(c, use_container_width=True)
+
+    # --- Global ---
+    with tabs[6]:
+        st.subheader("Global Comparison")
+        global_data = metrics[metrics["metric_name"] == "mf_aum_to_gdp_global"].sort_values("value", ascending=False)
+        if not global_data.empty:
+            c = alt.Chart(global_data).mark_bar(color="#60a5fa").encode(
+                x=alt.X("value:Q", title="AUM as % of GDP"),
+                y=alt.Y("segment:N", sort="-x", title=""),
+                tooltip=[alt.Tooltip("segment:N", title="Country"), alt.Tooltip("value:Q", format=".0f", title="AUM/GDP %")],
+            ).properties(height=len(global_data) * 25 + 50)
+            st.altair_chart(c, use_container_width=True)
+
+        cagr_data = metrics[metrics["metric_name"] == "regulated_net_assets_5yr_cagr"].sort_values("value", ascending=False)
+        if not cagr_data.empty:
+            c = alt.Chart(cagr_data).mark_bar(color="#4ade80").encode(
+                x=alt.X("value:Q", title="5-Year CAGR %"),
+                y=alt.Y("segment:N", sort="-x", title=""),
+                tooltip=[alt.Tooltip("segment:N", title="Country"), alt.Tooltip("value:Q", format=".1f", title="CAGR %")],
+            ).properties(height=len(cagr_data) * 25 + 50)
+            st.altair_chart(c, use_container_width=True)
+
+
+# =====================================================================
+# PAGE: GEOGRAPHY
+# =====================================================================
+
+elif page == "Geography":
+    st.title("Geography — State-wise Data")
+
+    state_df = load_state_data()
+    if state_df.empty:
+        st.warning("No state data available.")
+    else:
+        st.caption("Source: AMFI-CRISIL Factbook 2024 & AMFI Women's Day Report Mar 2025")
+
+        dim = st.selectbox("Select Dimension", ["Women's AUM Share", "Asset Allocation", "Age Groups"])
+
+        if dim == "Women's AUM Share":
+            wdata = state_df[state_df["dimension"] == "women_aum_pct"].sort_values("value_pct", ascending=False)
+            c = alt.Chart(wdata).mark_bar(color="#f472b6").encode(
+                x=alt.X("value_pct:Q", title="Women's Share of Individual AUM %"),
+                y=alt.Y("state:N", sort="-x", title=""),
+                tooltip=[alt.Tooltip("state:N"), alt.Tooltip("value_pct:Q", format=".1f", title="%")],
+            ).properties(height=len(wdata) * 20 + 50)
+            st.altair_chart(c, use_container_width=True)
+
+        elif dim == "Asset Allocation":
+            alloc = state_df[state_df["dimension"] == "asset_allocation"].copy()
+            if not alloc.empty:
+                alloc_colors = {"equity": "#4ade80", "debt": "#60a5fa", "hybrid": "#f59e0b", "passive": "#a78bfa", "others": "#94a3b8"}
+                c = alt.Chart(alloc).mark_bar().encode(
+                    x=alt.X("value_pct:Q", stack="normalize", title="Allocation %", axis=alt.Axis(format="%")),
+                    y=alt.Y("state:N", sort=alt.EncodingSortField(field="value_pct", op="sum", order="descending"), title=""),
+                    color=alt.Color("sub_dimension:N", title="Category",
+                                    scale=alt.Scale(domain=list(alloc_colors.keys()), range=list(alloc_colors.values()))),
+                    tooltip=[alt.Tooltip("state:N"), alt.Tooltip("sub_dimension:N", title="Category"), alt.Tooltip("value_pct:Q", format=".1f", title="%")],
+                ).properties(height=len(alloc["state"].unique()) * 20 + 50)
+                st.altair_chart(c, use_container_width=True)
+
+        elif dim == "Age Groups":
+            age = state_df[state_df["dimension"] == "age_group"].copy()
+            if not age.empty:
+                age_colors = {"below_25": "#4ade80", "25_to_44": "#60a5fa", "45_to_58": "#f59e0b", "above_58": "#f472b6", "not_specified": "#94a3b8"}
+                c = alt.Chart(age).mark_bar().encode(
+                    x=alt.X("value_pct:Q", stack="normalize", title="Age Distribution %", axis=alt.Axis(format="%")),
+                    y=alt.Y("state:N", sort=alt.EncodingSortField(field="value_pct", op="sum", order="descending"), title=""),
+                    color=alt.Color("sub_dimension:N", title="Age Group",
+                                    scale=alt.Scale(domain=list(age_colors.keys()), range=list(age_colors.values()))),
+                    tooltip=[alt.Tooltip("state:N"), alt.Tooltip("sub_dimension:N", title="Age Group"), alt.Tooltip("value_pct:Q", format=".1f", title="%")],
+                ).properties(height=len(age["state"].unique()) * 20 + 50)
+                st.altair_chart(c, use_container_width=True)
+
+
+# =====================================================================
+# PAGE: DATA EXPLORER
+# =====================================================================
 
 elif page == "Data Explorer":
     st.title("Data Explorer")
-    st.caption("Browse raw monthly data with filters")
+    st.caption("Browse and download raw data")
 
-    # Filters
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        months_list = sorted(df["report_month"].unique(), reverse=True)
-        selected_month = st.selectbox("Month", months_list, format_func=lambda x: pd.Timestamp(x).strftime("%B %Y"))
-    with col2:
-        sections = ["All"] + sorted(df["section"].unique().tolist())
-        selected_section = st.selectbox("Section", sections)
-    with col3:
-        groups_list = ["All"] + sorted(df["group"].dropna().unique().tolist())
-        selected_group_filter = st.selectbox("Group", groups_list)
+    dataset = st.selectbox("Select Dataset", ["Monthly AUM & Flows", "QAAUM by Fund House", "Industry Metrics", "State Data"])
 
-    filtered = df[df["report_month"] == selected_month].copy()
-    if selected_section != "All":
-        filtered = filtered[filtered["section"] == selected_section]
-    if selected_group_filter != "All":
-        filtered = filtered[filtered["group"] == selected_group_filter]
+    if dataset == "Monthly AUM & Flows":
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            months_list = sorted(df["report_month"].unique(), reverse=True)
+            selected_month = st.selectbox("Month", months_list, format_func=lambda x: pd.Timestamp(x).strftime("%B %Y"))
+        with col2:
+            sections = ["All"] + sorted(df["section"].unique().tolist())
+            selected_section = st.selectbox("Section", sections)
+        with col3:
+            groups_list = ["All"] + sorted(df["group"].dropna().unique().tolist())
+            selected_group_filter = st.selectbox("Group", groups_list)
 
-    display_cols = ["category", "section", "group", "aum_cr", "net_flow_cr", "funds_mobilized_cr", "redemption_cr", "num_folios", "num_schemes"]
-    filtered = filtered[display_cols].sort_values("aum_cr", ascending=False)
-    filtered.columns = ["Category", "Section", "Group", "AUM (Cr)", "Net Flow (Cr)", "Mobilized (Cr)", "Redemption (Cr)", "Folios", "Schemes"]
+        filtered = df[df["report_month"] == selected_month].copy()
+        if selected_section != "All":
+            filtered = filtered[filtered["section"] == selected_section]
+        if selected_group_filter != "All":
+            filtered = filtered[filtered["group"] == selected_group_filter]
 
-    st.dataframe(filtered, use_container_width=True, hide_index=True)
+        cols = ["category", "section", "group", "aum_cr", "net_flow_cr", "funds_mobilized_cr", "redemption_cr", "num_folios", "num_schemes"]
+        filtered = filtered[cols].sort_values("aum_cr", ascending=False)
+        filtered.columns = ["Category", "Section", "Group", "AUM (Cr)", "Net Flow (Cr)", "Gross Sales (Cr)", "Redemptions (Cr)", "Folios", "Schemes"]
+        st.dataframe(filtered, use_container_width=True, hide_index=True)
+        st.download_button("Download CSV", filtered.to_csv(index=False),
+                           file_name=f"mf_monthly_{pd.Timestamp(selected_month).strftime('%Y_%m')}.csv", mime="text/csv")
 
-    st.download_button(
-        "Download as CSV",
-        filtered.to_csv(index=False),
-        file_name=f"mf_industry_{pd.Timestamp(selected_month).strftime('%Y_%m')}.csv",
-        mime="text/csv",
-    )
+    elif dataset == "QAAUM by Fund House":
+        qdf = load_qaaum()
+        periods = sorted(qdf["period_start"].unique(), reverse=True)
+        sel_period = st.selectbox("Period", periods, format_func=lambda x: pd.Timestamp(x).strftime("%B %Y"))
+        filtered = qdf[qdf["period_start"] == sel_period][["fund_house", "aaum_total_cr", "aaum_excl_cr", "aaum_fof_cr"]].sort_values("aaum_total_cr", ascending=False)
+        filtered.columns = ["Fund House", "Total AAUM (Cr)", "Excl FoF (Cr)", "FoF (Cr)"]
+        st.dataframe(filtered, use_container_width=True, hide_index=True)
+        st.download_button("Download CSV", filtered.to_csv(index=False),
+                           file_name=f"qaaum_{pd.Timestamp(sel_period).strftime('%Y_%m')}.csv", mime="text/csv")
+
+    elif dataset == "Industry Metrics":
+        mdf = load_metrics()
+        cats = sorted(mdf["metric_category"].unique())
+        sel_cat = st.selectbox("Category", ["All"] + cats)
+        if sel_cat != "All":
+            mdf = mdf[mdf["metric_category"] == sel_cat]
+        display = mdf[["metric_name", "metric_category", "period_date", "value", "unit", "segment"]].sort_values(["metric_name", "period_date"], ascending=[True, False])
+        display.columns = ["Metric", "Category", "Date", "Value", "Unit", "Segment"]
+        st.dataframe(display, use_container_width=True, hide_index=True)
+        st.download_button("Download CSV", display.to_csv(index=False), file_name="mf_industry_metrics.csv", mime="text/csv")
+
+    elif dataset == "State Data":
+        sdf = load_state_data()
+        dims = sorted(sdf["dimension"].unique())
+        sel_dim = st.selectbox("Dimension", ["All"] + dims)
+        if sel_dim != "All":
+            sdf = sdf[sdf["dimension"] == sel_dim]
+        display = sdf[["state", "dimension", "sub_dimension", "value_pct", "source_report"]].sort_values(["state", "dimension"])
+        display.columns = ["State", "Dimension", "Sub-dimension", "Value %", "Source"]
+        st.dataframe(display, use_container_width=True, hide_index=True)
+        st.download_button("Download CSV", display.to_csv(index=False), file_name="mf_state_data.csv", mime="text/csv")
