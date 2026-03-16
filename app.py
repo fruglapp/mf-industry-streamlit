@@ -154,7 +154,7 @@ st.sidebar.caption("Indian Mutual Fund Industry")
 
 page = st.sidebar.radio(
     "Navigate",
-    ["Industry Pulse", "Flows", "Categories", "Market Share", "Industry Story", "Geography", "Data Explorer"],
+    ["Industry Pulse", "Flows", "Categories", "Market Share", "Industry Story", "Geography", "Scheme Portfolios", "Data Explorer"],
     label_visibility="collapsed",
 )
 
@@ -789,6 +789,143 @@ elif page == "Geography":
                     tooltip=[alt.Tooltip("state:N"), alt.Tooltip("sub_dimension:N", title="Age Group"), alt.Tooltip("value_pct:Q", format=".1f", title="%")],
                 ).properties(height=len(age["state"].unique()) * 20 + 50)
                 st.altair_chart(c, use_container_width=True)
+
+
+# =====================================================================
+# PAGE: SCHEME PORTFOLIOS
+# =====================================================================
+
+elif page == "Scheme Portfolios":
+    st.title("Scheme Portfolios")
+    st.caption("Holdings of individual mutual fund schemes — Feb 2026")
+
+    # Load scheme master
+    @st.cache_data(ttl=3600)
+    def load_scheme_master():
+        supabase = get_supabase()
+        result = supabase.table("scheme_master").select("*").eq("is_pilot", True).order("amc_short").execute()
+        return pd.DataFrame(result.data)
+
+    @st.cache_data(ttl=3600)
+    def load_holdings(scheme_code):
+        supabase = get_supabase()
+        result = (
+            supabase.table("scheme_holdings")
+            .select("*")
+            .eq("scheme_code", scheme_code)
+            .order("pct_to_nav", desc=True)
+            .execute()
+        )
+        hdf = pd.DataFrame(result.data)
+        for col in ["market_value_cr", "pct_to_nav", "quantity"]:
+            if col in hdf.columns:
+                hdf[col] = pd.to_numeric(hdf[col], errors="coerce")
+        return hdf
+
+    schemes = load_scheme_master()
+
+    if schemes.empty:
+        st.warning("No scheme data available.")
+    else:
+        CAP_COLORS_ST = {"Large Cap": "#4ade80", "Mid Cap": "#60a5fa", "Small Cap": "#f59e0b"}
+
+        # Filters
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            amcs = ["All"] + sorted(schemes["amc_short"].dropna().unique().tolist())
+            sel_amc = st.selectbox("AMC", amcs)
+        filt = schemes if sel_amc == "All" else schemes[schemes["amc_short"] == sel_amc]
+        with col2:
+            cats = ["All"] + sorted(filt["category"].dropna().unique().tolist())
+            sel_cat = st.selectbox("Category", cats)
+        if sel_cat != "All":
+            filt = filt[filt["category"] == sel_cat]
+        with col3:
+            scheme_opts = filt[["scheme_code", "scheme_name_short", "amc_short"]].drop_duplicates()
+            scheme_opts["label"] = scheme_opts["scheme_name_short"] + " (" + scheme_opts["amc_short"] + ")"
+            sel_label = st.selectbox("Scheme", scheme_opts["label"].tolist())
+
+        if sel_label:
+            sel_row = scheme_opts[scheme_opts["label"] == sel_label].iloc[0]
+            sel_code = int(sel_row["scheme_code"])
+            scheme_info = schemes[schemes["scheme_code"] == sel_code].iloc[0]
+
+            # Scheme header
+            nav_val = scheme_info.get("latest_nav")
+            nav_str = f"₹{float(nav_val):,.2f}" if pd.notna(nav_val) else "—"
+            st.caption(f"**{scheme_info['amc_name']}** · {scheme_info['category']} · NAV: {nav_str}")
+
+            hdf = load_holdings(sel_code)
+
+            if hdf.empty:
+                st.info("No holdings data for this scheme.")
+            else:
+                # Summary metrics
+                mc1, mc2, mc3, mc4 = st.columns(4)
+                eq_pct = hdf[hdf["security_type"] == "Equity"]["pct_to_nav"].sum()
+                total_val = hdf["market_value_cr"].sum()
+                top_sector = hdf[hdf["security_type"] == "Equity"].groupby("industry_sector")["pct_to_nav"].sum().idxmax() if not hdf[hdf["security_type"] == "Equity"].empty else "—"
+                mc1.metric("Holdings", str(len(hdf)))
+                mc2.metric("Equity %", f"{eq_pct:.1f}%")
+                mc3.metric("AUM", fmt_cr(total_val))
+                mc4.metric("Top Sector", top_sector)
+
+                # Market cap breakdown
+                eq_only = hdf[hdf["security_type"] == "Equity"].copy()
+                if not eq_only.empty:
+                    cap_grp = eq_only.groupby("market_cap_class")["pct_to_nav"].sum().reset_index()
+                    cap_grp.columns = ["Market Cap", "% to NAV"]
+                    cap_grp = cap_grp.sort_values("% to NAV", ascending=False)
+
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.markdown("**Market Cap Breakdown**")
+                        cap_chart = alt.Chart(cap_grp).mark_bar(cornerRadiusEnd=4).encode(
+                            x=alt.X("% to NAV:Q", title="% to NAV"),
+                            y=alt.Y("Market Cap:N", sort="-x", title=""),
+                            color=alt.Color("Market Cap:N", scale=alt.Scale(
+                                domain=list(CAP_COLORS_ST.keys()),
+                                range=list(CAP_COLORS_ST.values())
+                            ), legend=None),
+                            tooltip=["Market Cap", alt.Tooltip("% to NAV:Q", format=".1f")]
+                        ).properties(height=120)
+                        st.altair_chart(cap_chart, use_container_width=True)
+
+                    with col_b:
+                        st.markdown("**Top Sectors**")
+                        sec_grp = eq_only.groupby("industry_sector")["pct_to_nav"].sum().reset_index()
+                        sec_grp.columns = ["Sector", "% to NAV"]
+                        sec_grp = sec_grp.sort_values("% to NAV", ascending=False).head(8)
+                        sec_chart = alt.Chart(sec_grp).mark_bar(cornerRadiusEnd=4, color="#4ade80").encode(
+                            x=alt.X("% to NAV:Q", title="% to NAV"),
+                            y=alt.Y("Sector:N", sort="-x", title=""),
+                            tooltip=["Sector", alt.Tooltip("% to NAV:Q", format=".1f")]
+                        ).properties(height=200)
+                        st.altair_chart(sec_chart, use_container_width=True)
+
+                # Holdings table
+                st.markdown("**Holdings**")
+                type_filter = st.multiselect(
+                    "Filter by type",
+                    hdf["security_type"].unique().tolist(),
+                    default=hdf["security_type"].unique().tolist()
+                )
+                display_df = hdf[hdf["security_type"].isin(type_filter)][
+                    ["security_name", "security_type", "industry_sector", "market_cap_class", "pct_to_nav", "market_value_cr"]
+                ].copy()
+                display_df.columns = ["Security", "Type", "Sector", "Market Cap", "% NAV", "Value (Cr)"]
+                display_df["% NAV"] = display_df["% NAV"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "—")
+                display_df["Value (Cr)"] = display_df["Value (Cr)"].apply(lambda x: fmt_cr(x) if pd.notna(x) else "—")
+                st.dataframe(display_df, use_container_width=True, hide_index=True, height=500)
+
+                # Download
+                dl_df = hdf[["security_name", "isin", "security_type", "industry_sector", "market_cap_class", "quantity", "market_value_cr", "pct_to_nav"]].copy()
+                st.download_button(
+                    "Download CSV",
+                    dl_df.to_csv(index=False),
+                    file_name=f"portfolio_{sel_code}_feb2026.csv",
+                    mime="text/csv"
+                )
 
 
 # =====================================================================
