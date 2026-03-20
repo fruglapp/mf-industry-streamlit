@@ -83,6 +83,29 @@ def load_state_data():
     return df
 
 
+@st.cache_data(ttl=3600)
+def load_maaum():
+    data = fetch_all("maaum_classified", "report_month")
+    mdf = pd.DataFrame(data)
+    mdf["report_month"] = pd.to_datetime(mdf["report_month"])
+    for col in ["retail_cr", "corporates_cr", "banks_fis_cr", "fiis_fpis_cr", "hni_cr", "total_cr"]:
+        mdf[col] = pd.to_numeric(mdf[col], errors="coerce")
+    mdf["individual_cr"] = mdf["retail_cr"] + mdf["hni_cr"]
+    mdf["institutional_cr"] = mdf["corporates_cr"] + mdf["banks_fis_cr"] + mdf["fiis_fpis_cr"]
+    return mdf
+
+
+# Active/Passive classification
+PASSIVE_GROUPS = {"ETF", "Index"}
+
+# Category group → asset class mapping for display
+ASSET_CLASS_MAP = {
+    "Equity": "Equity", "Liquid": "Liquid", "Debt": "Debt",
+    "Hybrid": "Hybrid", "ETF": "ETF", "FOF": "FOF",
+    "Index": "Index", "Solution": "Solution", "Other": "Other",
+}
+
+
 # --- Formatting ---
 
 def fmt_cr(val):
@@ -154,7 +177,7 @@ st.sidebar.caption("Indian Mutual Fund Industry")
 
 page = st.sidebar.radio(
     "Navigate",
-    ["Industry Pulse", "Flows", "Categories", "Market Share", "Industry Story", "Geography", "Scheme Portfolios", "Data Explorer"],
+    ["Industry Pulse", "Flows", "Categories", "Market Share", "MAAUM", "Industry Story", "Geography", "Scheme Portfolios", "Data Explorer"],
     label_visibility="collapsed",
 )
 
@@ -536,6 +559,561 @@ elif page == "Market Share":
             ],
         ).properties(height=350)
         st.altair_chart(compare_chart, use_container_width=True)
+
+
+# =====================================================================
+# PAGE: MAAUM
+# =====================================================================
+
+elif page == "MAAUM":
+    st.title("MAAUM — Classified Average AUM")
+
+    maaum = load_maaum()
+    maaum_months = sorted(maaum["report_month"].unique())
+    maaum_latest = maaum_months[-1]
+    st.caption(f"Data as of {pd.Timestamp(maaum_latest).strftime('%B %Y')} · Source: AMFI")
+
+    # AMC list (excluding industry total mf_id=0)
+    amc_list = (
+        maaum[(maaum["report_month"] == maaum_latest) & (maaum["mf_id"] != 0)]
+        .groupby(["mf_id", "mf_name"])["total_cr"].sum()
+        .reset_index()
+        .sort_values("total_cr", ascending=False)
+    )
+    amc_names = amc_list["mf_name"].tolist()
+
+    tab_names = ["Composition", "AMC Ranking", "Asset", "Scheme Category", "Investor Type", "Distribution", "Composition Trend"]
+    tabs = st.tabs(tab_names)
+
+    # Helper: aggregate by dimension for a given month
+    def amc_aum(data, month):
+        return data[(data["report_month"] == month) & (data["mf_id"] != 0)].groupby("mf_name")["total_cr"].sum()
+
+    # Helper: get industry total for a month
+    def industry_total(data, month):
+        return data[(data["report_month"] == month) & (data["mf_id"] == 0)]["total_cr"].sum()
+
+    # ---- Tab 1: Composition ----
+    with tabs[0]:
+        sel_month_comp = st.selectbox(
+            "Month", maaum_months[::-1],
+            format_func=lambda x: pd.Timestamp(x).strftime("%B %Y"),
+            key="comp_month"
+        )
+        md = maaum[maaum["report_month"] == sel_month_comp]
+        amcs = md[md["mf_id"] != 0]
+
+        # Build composition table
+        comp_rows = []
+        for mf_name in amc_names[:16]:
+            a = amcs[amcs["mf_name"] == mf_name]
+            total = a["total_cr"].sum()
+            if total == 0:
+                continue
+
+            # Active vs Passive
+            passive = a[a["category_group"].isin(PASSIVE_GROUPS)]["total_cr"].sum()
+            active_pct = (total - passive) / total * 100 if total else 0
+
+            # Asset class shares
+            equity = a[a["category_group"] == "Equity"]["total_cr"].sum() / total * 100
+            debt_liq = a[a["category_group"].isin(["Debt", "Liquid"])]["total_cr"].sum() / total * 100
+            etf = a[a["category_group"] == "ETF"]["total_cr"].sum() / total * 100
+
+            # Individual vs Institutional
+            indiv = a["individual_cr"].sum() / total * 100
+
+            # B30
+            b30 = a[a["geography"] == "B15"]["total_cr"].sum() / total * 100
+
+            # Distribution channels
+            direct = a[a["dist_channel"] == "TDP"]["total_cr"].sum() / total * 100
+            assoc = a[a["dist_channel"] == "TAD"]["total_cr"].sum() / total * 100
+            non_assoc = a[a["dist_channel"] == "TNAD"]["total_cr"].sum() / total * 100
+
+            comp_rows.append({
+                "AMC": mf_name.replace(" Mutual Fund", " MF"),
+                "AUM (Cr)": total,
+                "Active%": active_pct,
+                "Equity%": equity,
+                "Debt%": debt_liq,
+                "ETF%": etf,
+                "Individual%": indiv,
+                "B30%": b30,
+                "Direct%": direct,
+                "Assoc Dist%": assoc,
+                "Non-Assoc%": non_assoc,
+            })
+
+        # Add Total row
+        ind_total = md[md["mf_id"] == 0]
+        if not ind_total.empty:
+            t = ind_total["total_cr"].sum()
+            comp_rows.append({
+                "AMC": "TOTAL (Industry)",
+                "AUM (Cr)": t,
+                "Active%": (t - ind_total[ind_total["category_group"].isin(PASSIVE_GROUPS)]["total_cr"].sum()) / t * 100 if t else 0,
+                "Equity%": ind_total[ind_total["category_group"] == "Equity"]["total_cr"].sum() / t * 100,
+                "Debt%": ind_total[ind_total["category_group"].isin(["Debt", "Liquid"])]["total_cr"].sum() / t * 100,
+                "ETF%": ind_total[ind_total["category_group"] == "ETF"]["total_cr"].sum() / t * 100,
+                "Individual%": ind_total["individual_cr"].sum() / t * 100,
+                "B30%": ind_total[ind_total["geography"] == "B15"]["total_cr"].sum() / t * 100,
+                "Direct%": ind_total[ind_total["dist_channel"] == "TDP"]["total_cr"].sum() / t * 100,
+                "Assoc Dist%": ind_total[ind_total["dist_channel"] == "TAD"]["total_cr"].sum() / t * 100,
+                "Non-Assoc%": ind_total[ind_total["dist_channel"] == "TNAD"]["total_cr"].sum() / t * 100,
+            })
+
+        comp_df = pd.DataFrame(comp_rows)
+        st.dataframe(
+            comp_df.style.format({
+                "AUM (Cr)": "{:,.0f}",
+                "Active%": "{:.1f}%", "Equity%": "{:.1f}%", "Debt%": "{:.1f}%",
+                "ETF%": "{:.1f}%", "Individual%": "{:.1f}%", "B30%": "{:.1f}%",
+                "Direct%": "{:.1f}%", "Assoc Dist%": "{:.1f}%", "Non-Assoc%": "{:.1f}%",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+
+    # ---- Tab 2: AMC Ranking ----
+    with tabs[1]:
+        st.subheader("AMC Ranking by AUM")
+        col1, col2 = st.columns(2)
+        with col1:
+            rank_start = st.selectbox(
+                "Growth from", maaum_months,
+                index=max(0, len(maaum_months) - 12),
+                format_func=lambda x: pd.Timestamp(x).strftime("%B %Y"),
+                key="rank_start"
+            )
+        with col2:
+            rank_end = st.selectbox(
+                "Growth to", maaum_months[::-1],
+                format_func=lambda x: pd.Timestamp(x).strftime("%B %Y"),
+                key="rank_end"
+            )
+
+        end_data = maaum[(maaum["report_month"] == rank_end) & (maaum["mf_id"] != 0)]
+        start_data = maaum[(maaum["report_month"] == rank_start) & (maaum["mf_id"] != 0)]
+
+        end_aum = end_data.groupby("mf_name")["total_cr"].sum().reset_index().rename(columns={"total_cr": "aum"})
+        start_aum = start_data.groupby("mf_name")["total_cr"].sum().reset_index().rename(columns={"total_cr": "aum_start"})
+
+        rank_df = end_aum.merge(start_aum, on="mf_name", how="left")
+        ind_end = industry_total(maaum, rank_end)
+        ind_start = industry_total(maaum, rank_start)
+        ind_growth = ind_end - ind_start
+
+        rank_df["share"] = (rank_df["aum"] / ind_end * 100).round(2)
+        rank_df["growth"] = rank_df["aum"] - rank_df["aum_start"].fillna(0)
+        rank_df["growth_share"] = (rank_df["growth"] / ind_growth * 100).round(2) if ind_growth > 0 else 0
+        rank_df = rank_df.sort_values("aum", ascending=False).reset_index(drop=True)
+        rank_df["aum_rank"] = range(1, len(rank_df) + 1)
+        rank_df["growth_rank"] = rank_df["growth"].rank(ascending=False, method="min").astype(int)
+
+        display_rank = rank_df[["mf_name", "aum", "share", "growth", "growth_share", "aum_rank", "growth_rank"]].copy()
+        display_rank["mf_name"] = display_rank["mf_name"].str.replace(" Mutual Fund", " MF")
+        display_rank.columns = ["AMC", "AUM (Cr)", "Market Share%", "AUM Growth (Cr)", "Growth Share%", "AUM Rank", "Growth Rank"]
+
+        st.dataframe(
+            display_rank.style.format({
+                "AUM (Cr)": "{:,.0f}", "Market Share%": "{:.2f}%",
+                "AUM Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+            }),
+            use_container_width=True, hide_index=True,
+        )
+
+        # Horizontal bar chart — top 15
+        bar_data = rank_df.head(15).copy()
+        bar_data["mf_name"] = bar_data["mf_name"].str.replace(" Mutual Fund", " MF")
+        bar = alt.Chart(bar_data).mark_bar(color="#4ade80").encode(
+            x=alt.X("aum:Q", axis=y_axis_lakhs_cr("AUM"), title="AUM (Cr)"),
+            y=alt.Y("mf_name:N", sort="-x", title=""),
+            tooltip=[
+                alt.Tooltip("mf_name:N", title="AMC"),
+                alt.Tooltip("aum:Q", format=",.0f", title="AUM (Cr)"),
+                alt.Tooltip("share:Q", format=".2f", title="Share %"),
+            ],
+        ).properties(height=15 * 28 + 50)
+        st.altair_chart(bar, use_container_width=True)
+
+    # ---- Tab 3: Asset ----
+    with tabs[2]:
+        sel_amc_asset = st.selectbox("Select AMC", amc_names, key="asset_amc",
+                                     format_func=lambda x: x.replace(" Mutual Fund", " MF"))
+        sel_mf_id = amc_list[amc_list["mf_name"] == sel_amc_asset]["mf_id"].values[0]
+
+        col1, col2 = st.columns(2)
+        with col1:
+            asset_start = st.selectbox("From", maaum_months,
+                                       index=max(0, len(maaum_months) - 12),
+                                       format_func=lambda x: pd.Timestamp(x).strftime("%B %Y"),
+                                       key="asset_start")
+        with col2:
+            asset_end = st.selectbox("To", maaum_months[::-1],
+                                     format_func=lambda x: pd.Timestamp(x).strftime("%B %Y"),
+                                     key="asset_end")
+
+        def build_asset_table(dimension_col, dimension_map, mf_id, start, end):
+            """Build a table with AMC AUM, Industry AUM, Market Share, Growth, Growth Share."""
+            rows = []
+            for dim_name, filter_fn in dimension_map.items():
+                # End period
+                amc_end = maaum[(maaum["report_month"] == end) & (maaum["mf_id"] == mf_id)]
+                amc_val = filter_fn(amc_end)["total_cr"].sum()
+                ind_end_d = maaum[(maaum["report_month"] == end) & (maaum["mf_id"] == 0)]
+                ind_val = filter_fn(ind_end_d)["total_cr"].sum()
+                mkt_share = (amc_val / ind_val * 100) if ind_val > 0 else 0
+
+                # Start period
+                amc_st = maaum[(maaum["report_month"] == start) & (maaum["mf_id"] == mf_id)]
+                amc_val_s = filter_fn(amc_st)["total_cr"].sum()
+                ind_st_d = maaum[(maaum["report_month"] == start) & (maaum["mf_id"] == 0)]
+                ind_val_s = filter_fn(ind_st_d)["total_cr"].sum()
+
+                amc_growth = amc_val - amc_val_s
+                ind_growth = ind_val - ind_val_s
+                growth_share = (amc_growth / ind_growth * 100) if ind_growth > 0 else 0
+
+                rows.append({
+                    dimension_col: dim_name,
+                    "AMC AUM (Cr)": amc_val,
+                    "Industry AUM (Cr)": ind_val,
+                    "Market Share%": mkt_share,
+                    "AMC Growth (Cr)": amc_growth,
+                    "Industry Growth (Cr)": ind_growth,
+                    "Growth Share%": growth_share,
+                })
+            return pd.DataFrame(rows)
+
+        # Active / Passive
+        st.markdown("**Active vs Passive**")
+        ap_map = {
+            "Active": lambda d: d[~d["category_group"].isin(PASSIVE_GROUPS)],
+            "Passive": lambda d: d[d["category_group"].isin(PASSIVE_GROUPS)],
+        }
+        ap_df = build_asset_table("Type", ap_map, sel_mf_id, asset_start, asset_end)
+        st.dataframe(ap_df.style.format({
+            "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
+            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+        }), use_container_width=True, hide_index=True)
+
+        # Asset Class
+        st.markdown("**Asset Class Breakdown**")
+        asset_groups = ["Equity", "Debt", "Liquid", "Hybrid", "ETF", "FOF"]
+        ac_map = {g: (lambda d, g=g: d[d["category_group"] == g]) for g in asset_groups}
+        ac_df = build_asset_table("Asset Class", ac_map, sel_mf_id, asset_start, asset_end)
+        ac_df = ac_df[ac_df["AMC AUM (Cr)"] > 0]
+        st.dataframe(ac_df.style.format({
+            "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
+            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+        }), use_container_width=True, hide_index=True)
+
+    # ---- Tab 4: Scheme Category ----
+    with tabs[3]:
+        sel_amc_cat = st.selectbox("Select AMC", amc_names, key="cat_amc",
+                                   format_func=lambda x: x.replace(" Mutual Fund", " MF"))
+        sel_mf_id_cat = amc_list[amc_list["mf_name"] == sel_amc_cat]["mf_id"].values[0]
+
+        col1, col2 = st.columns(2)
+        with col1:
+            cat_start = st.selectbox("From", maaum_months,
+                                     index=max(0, len(maaum_months) - 12),
+                                     format_func=lambda x: pd.Timestamp(x).strftime("%B %Y"),
+                                     key="cat_start")
+        with col2:
+            cat_end = st.selectbox("To", maaum_months[::-1],
+                                   format_func=lambda x: pd.Timestamp(x).strftime("%B %Y"),
+                                   key="cat_end")
+
+        # Get all categories for this AMC
+        cats_end = maaum[(maaum["report_month"] == cat_end) & (maaum["mf_id"] == sel_mf_id_cat)]
+        cats_start = maaum[(maaum["report_month"] == cat_start) & (maaum["mf_id"] == sel_mf_id_cat)]
+        ind_cats_end = maaum[(maaum["report_month"] == cat_end) & (maaum["mf_id"] == 0)]
+        ind_cats_start = maaum[(maaum["report_month"] == cat_start) & (maaum["mf_id"] == 0)]
+
+        cat_rows = []
+        for cat in cats_end["category"].unique():
+            amc_val = cats_end[cats_end["category"] == cat]["total_cr"].sum()
+            if amc_val == 0:
+                continue
+            ind_val = ind_cats_end[ind_cats_end["category"] == cat]["total_cr"].sum()
+            mkt_share = (amc_val / ind_val * 100) if ind_val > 0 else 0
+
+            amc_val_s = cats_start[cats_start["category"] == cat]["total_cr"].sum()
+            ind_val_s = ind_cats_start[ind_cats_start["category"] == cat]["total_cr"].sum()
+            amc_growth = amc_val - amc_val_s
+            ind_growth = ind_val - ind_val_s
+            growth_share = (amc_growth / ind_growth * 100) if ind_growth != 0 else 0
+
+            cat_rows.append({
+                "Category": cat,
+                "AMC AUM (Cr)": amc_val,
+                "Industry AUM (Cr)": ind_val,
+                "Market Share%": mkt_share,
+                "AMC Growth (Cr)": amc_growth,
+                "Industry Growth (Cr)": ind_growth,
+                "Growth Share%": growth_share,
+            })
+
+        cat_df = pd.DataFrame(cat_rows).sort_values("AMC AUM (Cr)", ascending=False)
+        st.dataframe(cat_df.style.format({
+            "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
+            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+        }), use_container_width=True, hide_index=True)
+
+    # ---- Tab 5: Investor Type ----
+    with tabs[4]:
+        sel_amc_inv = st.selectbox("Select AMC", amc_names, key="inv_amc",
+                                   format_func=lambda x: x.replace(" Mutual Fund", " MF"))
+        sel_mf_id_inv = amc_list[amc_list["mf_name"] == sel_amc_inv]["mf_id"].values[0]
+
+        col1, col2 = st.columns(2)
+        with col1:
+            inv_start = st.selectbox("From", maaum_months,
+                                     index=max(0, len(maaum_months) - 12),
+                                     format_func=lambda x: pd.Timestamp(x).strftime("%B %Y"),
+                                     key="inv_start")
+        with col2:
+            inv_end = st.selectbox("To", maaum_months[::-1],
+                                   format_func=lambda x: pd.Timestamp(x).strftime("%B %Y"),
+                                   key="inv_end")
+
+        # Individual / Institutional
+        st.markdown("**Individual vs Institutional**")
+        ii_map = {
+            "Individual": lambda d: pd.DataFrame({"total_cr": [d["individual_cr"].sum()]}),
+            "Institutional": lambda d: pd.DataFrame({"total_cr": [d["institutional_cr"].sum()]}),
+        }
+        ii_rows = []
+        for dim_name, agg_fn in ii_map.items():
+            amc_e = maaum[(maaum["report_month"] == inv_end) & (maaum["mf_id"] == sel_mf_id_inv)]
+            amc_val = agg_fn(amc_e)["total_cr"].sum()
+            ind_e = maaum[(maaum["report_month"] == inv_end) & (maaum["mf_id"] == 0)]
+            ind_val = agg_fn(ind_e)["total_cr"].sum()
+            mkt_share = (amc_val / ind_val * 100) if ind_val > 0 else 0
+
+            amc_s = maaum[(maaum["report_month"] == inv_start) & (maaum["mf_id"] == sel_mf_id_inv)]
+            amc_val_s = agg_fn(amc_s)["total_cr"].sum()
+            ind_s = maaum[(maaum["report_month"] == inv_start) & (maaum["mf_id"] == 0)]
+            ind_val_s = agg_fn(ind_s)["total_cr"].sum()
+
+            ii_rows.append({
+                "Type": dim_name,
+                "AMC AUM (Cr)": amc_val, "Industry AUM (Cr)": ind_val,
+                "Market Share%": mkt_share,
+                "AMC Growth (Cr)": amc_val - amc_val_s,
+                "Industry Growth (Cr)": ind_val - ind_val_s,
+                "Growth Share%": ((amc_val - amc_val_s) / (ind_val - ind_val_s) * 100) if (ind_val - ind_val_s) != 0 else 0,
+            })
+        ii_df = pd.DataFrame(ii_rows)
+        st.dataframe(ii_df.style.format({
+            "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
+            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+        }), use_container_width=True, hide_index=True)
+
+        # 5 investor types
+        st.markdown("**By Investor Type**")
+        inv_cols = [
+            ("HNI", "hni_cr"), ("Corporates", "corporates_cr"), ("Retail", "retail_cr"),
+            ("Banks/FIs", "banks_fis_cr"), ("FIIs/FPIs", "fiis_fpis_cr"),
+        ]
+        inv_rows = []
+        for inv_name, inv_col in inv_cols:
+            amc_e = maaum[(maaum["report_month"] == inv_end) & (maaum["mf_id"] == sel_mf_id_inv)]
+            amc_val = amc_e[inv_col].sum()
+            ind_e = maaum[(maaum["report_month"] == inv_end) & (maaum["mf_id"] == 0)]
+            ind_val = ind_e[inv_col].sum()
+            mkt_share = (amc_val / ind_val * 100) if ind_val > 0 else 0
+
+            amc_s = maaum[(maaum["report_month"] == inv_start) & (maaum["mf_id"] == sel_mf_id_inv)]
+            amc_val_s = amc_s[inv_col].sum()
+            ind_s = maaum[(maaum["report_month"] == inv_start) & (maaum["mf_id"] == 0)]
+            ind_val_s = ind_s[inv_col].sum()
+
+            inv_rows.append({
+                "Investor Type": inv_name,
+                "AMC AUM (Cr)": amc_val, "Industry AUM (Cr)": ind_val,
+                "Market Share%": mkt_share,
+                "AMC Growth (Cr)": amc_val - amc_val_s,
+                "Industry Growth (Cr)": ind_val - ind_val_s,
+                "Growth Share%": ((amc_val - amc_val_s) / (ind_val - ind_val_s) * 100) if (ind_val - ind_val_s) != 0 else 0,
+            })
+        inv_df = pd.DataFrame(inv_rows).sort_values("AMC AUM (Cr)", ascending=False)
+        st.dataframe(inv_df.style.format({
+            "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
+            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+        }), use_container_width=True, hide_index=True)
+
+        # Donut chart for investor composition
+        amc_e = maaum[(maaum["report_month"] == inv_end) & (maaum["mf_id"] == sel_mf_id_inv)]
+        donut_data = pd.DataFrame([
+            {"Type": n, "AUM": amc_e[c].sum()} for n, c in inv_cols
+        ])
+        donut_data = donut_data[donut_data["AUM"] > 0]
+        donut = alt.Chart(donut_data).mark_arc(innerRadius=50).encode(
+            theta=alt.Theta("AUM:Q"),
+            color=alt.Color("Type:N", scale=alt.Scale(
+                domain=["HNI", "Corporates", "Retail", "Banks/FIs", "FIIs/FPIs"],
+                range=["#4ade80", "#60a5fa", "#f59e0b", "#a78bfa", "#f472b6"]
+            )),
+            tooltip=[alt.Tooltip("Type:N"), alt.Tooltip("AUM:Q", format=",.0f", title="AUM (Cr)")],
+        ).properties(height=300, title="Investor Composition")
+        st.altair_chart(donut, use_container_width=True)
+
+    # ---- Tab 6: Distribution ----
+    with tabs[5]:
+        sel_amc_dist = st.selectbox("Select AMC", amc_names, key="dist_amc",
+                                    format_func=lambda x: x.replace(" Mutual Fund", " MF"))
+        sel_mf_id_dist = amc_list[amc_list["mf_name"] == sel_amc_dist]["mf_id"].values[0]
+
+        col1, col2 = st.columns(2)
+        with col1:
+            dist_start = st.selectbox("From", maaum_months,
+                                      index=max(0, len(maaum_months) - 12),
+                                      format_func=lambda x: pd.Timestamp(x).strftime("%B %Y"),
+                                      key="dist_start")
+        with col2:
+            dist_end = st.selectbox("To", maaum_months[::-1],
+                                    format_func=lambda x: pd.Timestamp(x).strftime("%B %Y"),
+                                    key="dist_end")
+
+        # Direct / Regular
+        st.markdown("**Direct vs Regular**")
+        dr_map = {
+            "Direct": lambda d: d[d["dist_channel"] == "TDP"],
+            "Regular": lambda d: d[d["dist_channel"].isin(["TAD", "TNAD"])],
+        }
+        dr_df = build_asset_table("Channel", dr_map, sel_mf_id_dist, dist_start, dist_end)
+        st.dataframe(dr_df.style.format({
+            "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
+            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+        }), use_container_width=True, hide_index=True)
+
+        # 3 channels
+        st.markdown("**By Distribution Channel**")
+        ch_labels = {"TDP": "Direct", "TAD": "Assoc Dist", "TNAD": "Non-Assoc Dist"}
+        ch_map = {v: (lambda d, ch=k: d[d["dist_channel"] == ch]) for k, v in ch_labels.items()}
+        ch_df = build_asset_table("Channel", ch_map, sel_mf_id_dist, dist_start, dist_end)
+        st.dataframe(ch_df.style.format({
+            "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
+            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+        }), use_container_width=True, hide_index=True)
+
+        # T30 / B30
+        st.markdown("**T30 vs B30**")
+        geo_map = {
+            "T30": lambda d: d[d["geography"] == "T15"],
+            "B30": lambda d: d[d["geography"] == "B15"],
+        }
+        geo_df = build_asset_table("Geography", geo_map, sel_mf_id_dist, dist_start, dist_end)
+        st.dataframe(geo_df.style.format({
+            "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
+            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+        }), use_container_width=True, hide_index=True)
+
+    # ---- Tab 7: Composition Trend ----
+    with tabs[6]:
+        dim_options = {
+            "B30%": ("geography", "B15", "total_cr"),
+            "Direct%": ("dist_channel", "TDP", "total_cr"),
+            "Individual%": ("investor", None, "individual_cr"),
+            "Equity%": ("category_group", "Equity", "total_cr"),
+            "Debt%": ("category_group", "Debt", "total_cr"),
+            "ETF%": ("category_group", "ETF", "total_cr"),
+            "Passive%": ("category_group_set", None, "total_cr"),
+            "Active%": ("category_group_set_inv", None, "total_cr"),
+        }
+        sel_dim = st.selectbox("Breakdown Dimension", list(dim_options.keys()), key="trend_dim")
+
+        def compute_dim_pct(data, mf_id, month, dim_key):
+            """Compute the % for a given dimension."""
+            d = data[(data["report_month"] == month) & (data["mf_id"] == mf_id)]
+            total = d["total_cr"].sum()
+            if total == 0:
+                return 0
+            dim_type, dim_val, col = dim_options[dim_key]
+            if dim_type == "geography":
+                return d[d["geography"] == dim_val][col].sum() / total * 100
+            elif dim_type == "dist_channel":
+                return d[d["dist_channel"] == dim_val][col].sum() / total * 100
+            elif dim_type == "investor":
+                return d[col].sum() / total * 100
+            elif dim_type == "category_group":
+                return d[d["category_group"] == dim_val][col].sum() / total * 100
+            elif dim_type == "category_group_set":
+                return d[d["category_group"].isin(PASSIVE_GROUPS)][col].sum() / total * 100
+            elif dim_type == "category_group_set_inv":
+                return (total - d[d["category_group"].isin(PASSIVE_GROUPS)][col].sum()) / total * 100
+            return 0
+
+        # Build trend table: rows = AMCs (top 10, next 10, total), columns = months
+        trend_rows = []
+        # Get AMC ranking by latest AUM
+        latest_ranking = (
+            maaum[(maaum["report_month"] == maaum_latest) & (maaum["mf_id"] != 0)]
+            .groupby(["mf_id", "mf_name"])["total_cr"].sum()
+            .reset_index()
+            .sort_values("total_cr", ascending=False)
+        )
+        ranked_amcs = latest_ranking[["mf_id", "mf_name"]].values.tolist()
+
+        top10 = ranked_amcs[:10]
+        next10 = ranked_amcs[10:20]
+
+        for label, group in [("Top 10", top10), ("Next 10", next10)]:
+            for mf_id, mf_name in group:
+                row = {"AMC": mf_name.replace(" Mutual Fund", " MF")}
+                for m in maaum_months:
+                    col_label = pd.Timestamp(m).strftime("%b-%y")
+                    row[col_label] = round(compute_dim_pct(maaum, mf_id, m, sel_dim), 1)
+                trend_rows.append(row)
+            # Subtotal for the group
+            group_ids = [mid for mid, _ in group]
+            sub_row = {"AMC": f"— {label} Subtotal —"}
+            for m in maaum_months:
+                col_label = pd.Timestamp(m).strftime("%b-%y")
+                gd = maaum[(maaum["report_month"] == m) & (maaum["mf_id"].isin(group_ids))]
+                gtotal = gd["total_cr"].sum()
+                if gtotal == 0:
+                    sub_row[col_label] = 0
+                else:
+                    dim_type, dim_val, col = dim_options[sel_dim]
+                    if dim_type == "geography":
+                        sub_row[col_label] = round(gd[gd["geography"] == dim_val][col].sum() / gtotal * 100, 1)
+                    elif dim_type == "dist_channel":
+                        sub_row[col_label] = round(gd[gd["dist_channel"] == dim_val][col].sum() / gtotal * 100, 1)
+                    elif dim_type == "investor":
+                        sub_row[col_label] = round(gd[col].sum() / gtotal * 100, 1)
+                    elif dim_type == "category_group":
+                        sub_row[col_label] = round(gd[gd["category_group"] == dim_val][col].sum() / gtotal * 100, 1)
+                    elif dim_type == "category_group_set":
+                        sub_row[col_label] = round(gd[gd["category_group"].isin(PASSIVE_GROUPS)][col].sum() / gtotal * 100, 1)
+                    elif dim_type == "category_group_set_inv":
+                        sub_row[col_label] = round((gtotal - gd[gd["category_group"].isin(PASSIVE_GROUPS)][col].sum()) / gtotal * 100, 1)
+            trend_rows.append(sub_row)
+
+        # Industry total
+        total_row = {"AMC": "TOTAL (Industry)"}
+        for m in maaum_months:
+            col_label = pd.Timestamp(m).strftime("%b-%y")
+            total_row[col_label] = round(compute_dim_pct(maaum, 0, m, sel_dim), 1)
+        trend_rows.append(total_row)
+
+        trend_df = pd.DataFrame(trend_rows)
+        month_cols = [c for c in trend_df.columns if c != "AMC"]
+        fmt_dict = {c: "{:.1f}%" for c in month_cols}
+        st.dataframe(
+            trend_df.style.format(fmt_dict),
+            use_container_width=True, hide_index=True,
+        )
 
 
 # =====================================================================
