@@ -169,50 +169,45 @@ GROUP_COLORS = {
 st.sidebar.title("MF Industry")
 st.sidebar.caption("Indian Mutual Fund Industry")
 
-st.sidebar.markdown("**Monthly Fact Sheet**")
-page_group1 = st.sidebar.radio(
-    "Monthly", ["Industry Pulse", "Flows", "Categories"],
-    label_visibility="collapsed", key="nav_monthly",
-)
+# Grouped page list with section dividers
+PAGE_LIST = [
+    "---Monthly Fact Sheet---",
+    "Industry Pulse",
+    "Flows",
+    "Categories",
+    "---QAUM---",
+    "Market Share",
+    "---Classified AAUM---",
+    "MAAUM",
+    "---Tools---",
+    "Scheme Portfolios",
+    "Data Explorer",
+]
 
-st.sidebar.markdown("**QAUM**")
-page_group2 = st.sidebar.radio(
-    "QAUM", ["Market Share"],
-    label_visibility="collapsed", key="nav_qaum",
-)
+# Render as selectbox with section headers (Streamlit doesn't support grouped radio)
+# Use a single selectbox for clean single-selection
+actual_pages = [p for p in PAGE_LIST if not p.startswith("---")]
 
-st.sidebar.markdown("**Classified AAUM**")
-page_group3 = st.sidebar.radio(
-    "MAAUM", ["MAAUM"],
-    label_visibility="collapsed", key="nav_maaum",
-)
+# Build sidebar navigation manually with section headers and buttons
+if "_active_page" not in st.session_state:
+    st.session_state["_active_page"] = "Industry Pulse"
 
-st.sidebar.markdown("**Tools**")
-page_group4 = st.sidebar.radio(
-    "Tools", ["Scheme Portfolios", "Data Explorer"],
-    label_visibility="collapsed", key="nav_tools",
-)
+for item in PAGE_LIST:
+    if item.startswith("---"):
+        section = item.strip("-")
+        st.sidebar.markdown(f"**{section}**")
+    else:
+        is_active = st.session_state["_active_page"] == item
+        if st.sidebar.button(
+            f"{'● ' if is_active else '○ '}{item}",
+            key=f"nav_{item}",
+            use_container_width=True,
+            type="primary" if is_active else "secondary",
+        ):
+            st.session_state["_active_page"] = item
+            st.rerun()
 
-# Determine active page — only one radio can be selected at a time in Streamlit,
-# but with multiple radios we need to track which was last clicked via session state.
-all_pages = {
-    "nav_monthly": page_group1,
-    "nav_qaum": page_group2,
-    "nav_maaum": page_group3,
-    "nav_tools": page_group4,
-}
-
-# Track which nav group was last interacted with
-_prev = st.session_state.get("_nav_prev", {})
-page = None
-for key, val in all_pages.items():
-    if _prev.get(key) != val:
-        page = val
-        break
-if page is None:
-    page = st.session_state.get("_active_page", "Industry Pulse")
-st.session_state["_nav_prev"] = dict(all_pages)
-st.session_state["_active_page"] = page
+page = st.session_state["_active_page"]
 
 # --- Load core data ---
 
