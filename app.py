@@ -66,6 +66,17 @@ def load_qaaum():
 
 
 @st.cache_data(ttl=3600)
+def load_qaaum_schemes():
+    data = fetch_all("qaaum_schemewise", "period_start")
+    df = pd.DataFrame(data)
+    df["period_start"] = pd.to_datetime(df["period_start"])
+    for col in ["aaum_excl_cr", "aaum_fof_cr", "aaum_total_cr"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+@st.cache_data(ttl=3600)
 def load_metrics():
     data = fetch_all("mf_industry_metrics", "period_date")
     df = pd.DataFrame(data)
@@ -624,6 +635,90 @@ elif page == "Market Share":
             ],
         ).properties(height=350)
         st.altair_chart(compare_chart, use_container_width=True)
+
+    # --- Scheme-level Data ---
+    st.divider()
+    st.subheader("Scheme-level QAUM")
+
+    sdf = load_qaaum_schemes()
+    if not sdf.empty:
+        s_latest = sdf["period_start"].max()
+        st.caption(f"Scheme data as of {s_latest.strftime('%B %Y')} quarter")
+
+        stab1, stab2 = st.tabs(["Top Schemes", "AMC × Scheme Drill-down"])
+
+        with stab1:
+            top_s_n = st.slider("Top schemes", 10, 50, 25, key="top_schemes_n")
+            s_latest_data = sdf[sdf["period_start"] == s_latest].sort_values("aaum_total_cr", ascending=False)
+            top_schemes = s_latest_data.head(top_s_n).copy()
+            top_schemes["display_name"] = top_schemes["scheme_name"].str[:60]
+
+            s_bar = alt.Chart(top_schemes).mark_bar(color="#60a5fa").encode(
+                x=alt.X("aaum_total_cr:Q", axis=y_axis_lakhs_cr("AAUM"), title="AAUM (Cr)"),
+                y=alt.Y("display_name:N", sort="-x", title=""),
+                color=alt.Color("mf_name:N", title="AMC", legend=None),
+                tooltip=[
+                    alt.Tooltip("scheme_name:N", title="Scheme"),
+                    alt.Tooltip("mf_name:N", title="AMC"),
+                    alt.Tooltip("aaum_total_cr:Q", format=",.0f", title="AAUM (Cr)"),
+                ],
+            ).properties(height=top_s_n * 22 + 50)
+            st.altair_chart(s_bar, use_container_width=True)
+
+            # Table
+            s_table = top_schemes[["scheme_name", "mf_name", "aaum_total_cr"]].copy()
+            s_total = s_latest_data["aaum_total_cr"].sum()
+            s_table["share"] = (s_table["aaum_total_cr"] / s_total * 100).round(2)
+            s_table.columns = ["Scheme", "AMC", "AAUM (Cr)", "Share %"]
+            st.dataframe(
+                s_table.style.format({"AAUM (Cr)": "{:,.0f}", "Share %": "{:.2f}%"}),
+                use_container_width=True, hide_index=True,
+            )
+
+        with stab2:
+            # Select an AMC to drill into its schemes
+            amc_list_s = sorted(sdf[sdf["period_start"] == s_latest]["mf_name"].unique())
+            sel_amc = st.selectbox("Select AMC", amc_list_s, key="scheme_amc_select")
+            amc_schemes = (
+                sdf[(sdf["period_start"] == s_latest) & (sdf["mf_name"] == sel_amc)]
+                .sort_values("aaum_total_cr", ascending=False)
+            )
+
+            st.metric("Total QAUM", fmt_cr(amc_schemes["aaum_total_cr"].sum()))
+            st.metric("Schemes", f"{len(amc_schemes):,}")
+
+            # Show top schemes for this AMC
+            amc_top = amc_schemes.head(20).copy()
+            amc_top["display_name"] = amc_top["scheme_name"].str[:50]
+            amc_bar = alt.Chart(amc_top).mark_bar(color="#4ade80").encode(
+                x=alt.X("aaum_total_cr:Q", title="AAUM (Cr)"),
+                y=alt.Y("display_name:N", sort="-x", title=""),
+                tooltip=[
+                    alt.Tooltip("scheme_name:N", title="Scheme"),
+                    alt.Tooltip("aaum_total_cr:Q", format=",.0f", title="AAUM (Cr)"),
+                ],
+            ).properties(height=20 * 22 + 50)
+            st.altair_chart(amc_bar, use_container_width=True)
+
+            # Scheme trend — select specific schemes to compare over quarters
+            amc_scheme_names = amc_schemes["scheme_name"].tolist()[:10]
+            sel_schemes = st.multiselect("Compare schemes over time", amc_scheme_names, default=amc_scheme_names[:3], key="scheme_compare")
+            if sel_schemes:
+                s_trend = sdf[(sdf["mf_name"] == sel_amc) & (sdf["scheme_name"].isin(sel_schemes))].sort_values("period_start")
+                s_trend["short_name"] = s_trend["scheme_name"].str[:40]
+                s_trend_chart = alt.Chart(s_trend).mark_line(strokeWidth=2).encode(
+                    x=alt.X("period_start:T", title=""),
+                    y=alt.Y("aaum_total_cr:Q", title="AAUM (Cr)"),
+                    color=alt.Color("short_name:N", title="Scheme"),
+                    tooltip=[
+                        alt.Tooltip("period_start:T", format="%B %Y"),
+                        alt.Tooltip("scheme_name:N"),
+                        alt.Tooltip("aaum_total_cr:Q", format=",.0f", title="AAUM (Cr)"),
+                    ],
+                ).properties(height=300)
+                st.altair_chart(s_trend_chart, use_container_width=True)
+    else:
+        st.info("Scheme-level QAUM data not yet loaded.")
 
 
 # =====================================================================
