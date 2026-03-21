@@ -113,8 +113,6 @@ def fmt_cr(val):
         return "—"
     if abs(val) >= 100000:
         return f"₹{val / 100000:,.1f}L Cr"
-    if abs(val) >= 1000:
-        return f"₹{val / 1000:,.1f}K Cr"
     return f"₹{val:,.0f} Cr"
 
 
@@ -122,10 +120,8 @@ def fmt_cr_short(val):
     if pd.isna(val):
         return "—"
     if abs(val) >= 100000:
-        return f"{val / 100000:,.1f}L"
-    if abs(val) >= 1000:
-        return f"{val / 1000:,.1f}K"
-    return f"{val:,.0f}"
+        return f"{val / 100000:,.1f}L Cr"
+    return f"{val:,.0f} Cr"
 
 
 def fmt_num(val):
@@ -135,8 +131,6 @@ def fmt_num(val):
         return f"{val / 10000000:,.2f} Cr"
     if abs(val) >= 100000:
         return f"{val / 100000:,.1f}L"
-    if abs(val) >= 1000:
-        return f"{val / 1000:,.1f}K"
     return f"{val:,.0f}"
 
 
@@ -156,7 +150,7 @@ def y_axis_lakhs_cr(title=""):
     return alt.Axis(
         title=title,
         format="~s",
-        labelExpr="datum.value >= 100000 ? format(datum.value / 100000, '.0f') + 'L Cr' : datum.value >= 1000 ? format(datum.value / 1000, '.0f') + 'K Cr' : format(datum.value, '.0f') + ' Cr'"
+        labelExpr="datum.value >= 100000 ? format(datum.value / 100000, '.0f') + 'L Cr' : format(datum.value, ',.0f') + ' Cr'"
     )
 
 
@@ -175,11 +169,50 @@ GROUP_COLORS = {
 st.sidebar.title("MF Industry")
 st.sidebar.caption("Indian Mutual Fund Industry")
 
-page = st.sidebar.radio(
-    "Navigate",
-    ["Industry Pulse", "Flows", "Categories", "Market Share", "MAAUM", "Industry Story", "Geography", "Scheme Portfolios", "Data Explorer"],
-    label_visibility="collapsed",
+st.sidebar.markdown("**Monthly Fact Sheet**")
+page_group1 = st.sidebar.radio(
+    "Monthly", ["Industry Pulse", "Flows", "Categories"],
+    label_visibility="collapsed", key="nav_monthly",
 )
+
+st.sidebar.markdown("**QAUM**")
+page_group2 = st.sidebar.radio(
+    "QAUM", ["Market Share"],
+    label_visibility="collapsed", key="nav_qaum",
+)
+
+st.sidebar.markdown("**Classified AAUM**")
+page_group3 = st.sidebar.radio(
+    "MAAUM", ["MAAUM"],
+    label_visibility="collapsed", key="nav_maaum",
+)
+
+st.sidebar.markdown("**Tools**")
+page_group4 = st.sidebar.radio(
+    "Tools", ["Scheme Portfolios", "Data Explorer"],
+    label_visibility="collapsed", key="nav_tools",
+)
+
+# Determine active page — only one radio can be selected at a time in Streamlit,
+# but with multiple radios we need to track which was last clicked via session state.
+all_pages = {
+    "nav_monthly": page_group1,
+    "nav_qaum": page_group2,
+    "nav_maaum": page_group3,
+    "nav_tools": page_group4,
+}
+
+# Track which nav group was last interacted with
+_prev = st.session_state.get("_nav_prev", {})
+page = None
+for key, val in all_pages.items():
+    if _prev.get(key) != val:
+        page = val
+        break
+if page is None:
+    page = st.session_state.get("_active_page", "Industry Pulse")
+st.session_state["_nav_prev"] = dict(all_pages)
+st.session_state["_active_page"] = page
 
 # --- Load core data ---
 
@@ -201,29 +234,52 @@ if page == "Industry Pulse":
     gt_prev = df[(df["report_month"] == prev_month) & (df["category"] == "Grand Total")]
     gt_yoy = df[(df["report_month"] == year_ago) & (df["category"] == "Grand Total")]
 
+    # Equity-oriented flows
+    equity_latest = df[
+        (df["report_month"] == latest_month) & (df["section"] == "Open Ended") & (df["group"] == "Equity")
+    ]["net_flow_cr"].sum()
+
     if not gt.empty:
         r = gt.iloc[0]
         rp = gt_prev.iloc[0] if not gt_prev.empty else None
         ry = gt_yoy.iloc[0] if not gt_yoy.empty else None
 
-        # KPI row
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Total AUM", fmt_cr(r["aum_cr"]),
-                   delta=f"{pct_change(r['aum_cr'], rp['aum_cr']):.1f}% MoM" if rp is not None else None)
-        c2.metric("YoY Growth", f"{pct_change(r['aum_cr'], ry['aum_cr']):.1f}%" if ry is not None else "—")
-        c3.metric("Net Flows", fmt_cr(r["net_flow_cr"]),
-                   delta=f"{fmt_cr_short(rp['net_flow_cr'])} Cr prev" if rp is not None else None)
-        c4.metric("Folios", fmt_num(r["num_folios"]),
-                   delta=f"{fmt_num(r['num_folios'] - rp['num_folios'])} new" if rp is not None and not pd.isna(rp['num_folios']) else None)
-        c5.metric("Schemes", fmt_num(r["num_schemes"]))
+        mom_pct = pct_change(r['aum_cr'], rp['aum_cr']) if rp is not None else None
+        yoy_pct = pct_change(r['aum_cr'], ry['aum_cr']) if ry is not None else None
 
-    # AUM trend — Altair with proper axis
+        # KPI row
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total AUM", fmt_cr(r["aum_cr"]),
+                   delta=f"{mom_pct:.1f}% MoM" if mom_pct is not None else None)
+        c2.metric("YoY Growth", f"{yoy_pct:.1f}%" if yoy_pct is not None else "—")
+        c3.metric("Net Flows", fmt_cr(r["net_flow_cr"]))
+        c4.metric("Equity Flows", fmt_cr(equity_latest))
+
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric("Folios", fmt_num(r["num_folios"]),
+                   delta=f"{fmt_num(r['num_folios'] - rp['num_folios'])} new" if rp is not None and not pd.isna(rp['num_folios']) else None)
+        c6.metric("Schemes", f"{int(r['num_schemes']):,}" if not pd.isna(r["num_schemes"]) else "—")
+
+    # AUM trend — Altair with group filter
     st.subheader("AUM Trend")
-    aum_trend = (
-        df[df["category"] == "Grand Total"]
-        .sort_values("report_month")[["report_month", "aum_cr"]]
-        .rename(columns={"report_month": "Month", "aum_cr": "AUM"})
+    group_filter = st.radio(
+        "Filter by group", ["All"] + GROUPS, horizontal=True, key="pulse_group_filter"
     )
+
+    if group_filter == "All":
+        aum_trend = (
+            df[df["category"] == "Grand Total"]
+            .sort_values("report_month")[["report_month", "aum_cr"]]
+            .rename(columns={"report_month": "Month", "aum_cr": "AUM"})
+        )
+    else:
+        aum_trend = (
+            df[(df["section"] == "Open Ended") & (df["group"] == group_filter)]
+            .groupby("report_month")["aum_cr"].sum().reset_index()
+            .sort_values("report_month")
+            .rename(columns={"report_month": "Month", "aum_cr": "AUM"})
+        )
+
     chart = alt.Chart(aum_trend).mark_area(
         color="#4ade80", opacity=0.6, line={"color": "#4ade80"}
     ).encode(
@@ -1114,259 +1170,6 @@ elif page == "MAAUM":
             trend_df.style.format(fmt_dict),
             use_container_width=True, hide_index=True,
         )
-
-
-# =====================================================================
-# PAGE: INDUSTRY STORY
-# =====================================================================
-
-elif page == "Industry Story":
-    st.title("Industry Story")
-    st.caption("Structural trends shaping the Indian mutual fund industry")
-
-    metrics = load_metrics()
-
-    tab_names = ["AUM & Macro", "SIP", "Passive Funds", "Digital", "Women in MF", "Investors", "Global"]
-    tabs = st.tabs(tab_names)
-
-    # --- AUM & Macro ---
-    with tabs[0]:
-        st.subheader("AUM vs GDP")
-        aum_gdp = metrics[metrics["metric_name"] == "mf_aum_to_gdp_ratio"].sort_values("period_date")
-        if not aum_gdp.empty:
-            c = alt.Chart(aum_gdp).mark_bar(color="#4ade80").encode(
-                x=alt.X("period_date:T", title=""),
-                y=alt.Y("value:Q", title="AUM as % of GDP"),
-                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f", title="%")],
-            ).properties(height=250)
-            st.altair_chart(c, use_container_width=True)
-
-        st.subheader("AMC Concentration")
-        col1, col2 = st.columns(2)
-        with col1:
-            top5_conc = metrics[metrics["metric_name"] == "amc_concentration_top5"].sort_values("period_date")
-            if not top5_conc.empty:
-                c = alt.Chart(top5_conc).mark_line(color="#4ade80", strokeWidth=2).encode(
-                    x=alt.X("period_date:T", title=""), y=alt.Y("value:Q", title="Top 5 Share %", scale=alt.Scale(zero=False)),
-                    tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
-                ).properties(height=200, title="Top 5 AMCs")
-                st.altair_chart(c, use_container_width=True)
-        with col2:
-            top10_conc = metrics[metrics["metric_name"] == "amc_concentration_top10"].sort_values("period_date")
-            if not top10_conc.empty:
-                c = alt.Chart(top10_conc).mark_line(color="#60a5fa", strokeWidth=2).encode(
-                    x=alt.X("period_date:T", title=""), y=alt.Y("value:Q", title="Top 10 Share %", scale=alt.Scale(zero=False)),
-                    tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
-                ).properties(height=200, title="Top 10 AMCs")
-                st.altair_chart(c, use_container_width=True)
-
-        st.subheader("Macro Context")
-        macro_metrics = ["gdp_growth_rate", "gross_domestic_savings_rate", "gdp_per_capita_nominal"]
-        for m in macro_metrics:
-            mdata = metrics[metrics["metric_name"] == m].sort_values("period_date")
-            if not mdata.empty:
-                label = m.replace("_", " ").title()
-                unit = mdata.iloc[0]["unit"] if "unit" in mdata.columns else ""
-                c = alt.Chart(mdata).mark_line(color="#f59e0b", strokeWidth=2).encode(
-                    x=alt.X("period_date:T", title=""),
-                    y=alt.Y("value:Q", title=f"{label} ({unit})", scale=alt.Scale(zero=False)),
-                    tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
-                ).properties(height=180, title=label)
-                st.altair_chart(c, use_container_width=True)
-
-    # --- SIP ---
-    with tabs[1]:
-        st.subheader("SIP Growth")
-        sip_aum = metrics[metrics["metric_name"] == "sip_aum"].sort_values("period_date")
-        if not sip_aum.empty:
-            c = alt.Chart(sip_aum).mark_bar(color="#4ade80").encode(
-                x=alt.X("period_date:T", title=""),
-                y=alt.Y("value:Q", title="SIP AUM (L Cr)"),
-                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=",.0f")],
-            ).properties(height=250)
-            st.altair_chart(c, use_container_width=True)
-
-        sip_share = metrics[metrics["metric_name"] == "sip_aum_share_of_industry"].sort_values("period_date")
-        if not sip_share.empty:
-            c = alt.Chart(sip_share).mark_line(color="#f59e0b", strokeWidth=2).encode(
-                x=alt.X("period_date:T", title=""),
-                y=alt.Y("value:Q", title="SIP AUM as % of Industry"),
-                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
-            ).properties(height=200)
-            st.altair_chart(c, use_container_width=True)
-
-    # --- Passive Funds ---
-    with tabs[2]:
-        st.subheader("Passive Funds Rise")
-        passive_share = metrics[metrics["metric_name"] == "passive_aum_share"].sort_values("period_date")
-        if not passive_share.empty:
-            c = alt.Chart(passive_share).mark_area(color="#a78bfa", opacity=0.5, line={"color": "#a78bfa"}).encode(
-                x=alt.X("period_date:T", title=""),
-                y=alt.Y("value:Q", title="Passive Share of Industry %"),
-                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
-            ).properties(height=250)
-            st.altair_chart(c, use_container_width=True)
-
-        passive_aum = metrics[metrics["metric_name"] == "passive_aum"].sort_values("period_date")
-        if not passive_aum.empty:
-            c = alt.Chart(passive_aum).mark_bar(color="#a78bfa").encode(
-                x=alt.X("period_date:T", title=""),
-                y=alt.Y("value:Q", title="Passive AUM (L Cr)"),
-                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=",.0f")],
-            ).properties(height=250)
-            st.altair_chart(c, use_container_width=True)
-
-    # --- Digital ---
-    with tabs[3]:
-        st.subheader("Digital Adoption")
-        for m in ["digital_channel_mf_purchase", "digital_channel_sip_purchase"]:
-            mdata = metrics[metrics["metric_name"] == m].sort_values("period_date")
-            if not mdata.empty:
-                label = m.replace("_", " ").title()
-                c = alt.Chart(mdata).mark_bar(color="#60a5fa").encode(
-                    x=alt.X("period_date:T", title=""),
-                    y=alt.Y("value:Q", title="%"),
-                    tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
-                ).properties(height=200, title=label)
-                st.altair_chart(c, use_container_width=True)
-
-    # --- Women in MF ---
-    with tabs[4]:
-        st.subheader("Women in Mutual Funds")
-
-        women_aum = metrics[metrics["metric_name"] == "women_aum"].sort_values("period_date")
-        if not women_aum.empty:
-            c = alt.Chart(women_aum).mark_area(color="#f472b6", opacity=0.5, line={"color": "#f472b6"}).encode(
-                x=alt.X("period_date:T", title=""),
-                y=alt.Y("value:Q", title="Women's AUM (L Cr)"),
-                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=",.0f")],
-            ).properties(height=250)
-            st.altair_chart(c, use_container_width=True)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            w_share = metrics[metrics["metric_name"] == "women_share_individual_aum"].sort_values("period_date")
-            if not w_share.empty:
-                c = alt.Chart(w_share).mark_line(color="#f472b6", strokeWidth=2).encode(
-                    x=alt.X("period_date:T", title=""),
-                    y=alt.Y("value:Q", title="%", scale=alt.Scale(zero=False)),
-                    tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
-                ).properties(height=200, title="Women's Share of Individual AUM")
-                st.altair_chart(c, use_container_width=True)
-        with col2:
-            w_inv = metrics[metrics["metric_name"] == "women_share_unique_investors"].sort_values("period_date")
-            if not w_inv.empty:
-                c = alt.Chart(w_inv).mark_line(color="#a78bfa", strokeWidth=2).encode(
-                    x=alt.X("period_date:T", title=""),
-                    y=alt.Y("value:Q", title="%", scale=alt.Scale(zero=False)),
-                    tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".1f")],
-                ).properties(height=200, title="Women's Share of Unique Investors")
-                st.altair_chart(c, use_container_width=True)
-
-        # Women SIP
-        w_sip = metrics[metrics["metric_name"] == "women_sip_aum"].sort_values("period_date")
-        if not w_sip.empty:
-            c = alt.Chart(w_sip).mark_bar(color="#f472b6").encode(
-                x=alt.X("period_date:T", title=""),
-                y=alt.Y("value:Q", title="Women SIP AUM (L Cr)"),
-                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=",.0f")],
-            ).properties(height=200)
-            st.altair_chart(c, use_container_width=True)
-
-    # --- Investors ---
-    with tabs[5]:
-        st.subheader("Investor Base")
-        uniq = metrics[metrics["metric_name"] == "unique_investors"].sort_values("period_date")
-        if not uniq.empty:
-            c = alt.Chart(uniq).mark_bar(color="#4ade80").encode(
-                x=alt.X("period_date:T", title=""),
-                y=alt.Y("value:Q", title="Unique Investors (Cr)"),
-                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("value:Q", format=".2f")],
-            ).properties(height=250)
-            st.altair_chart(c, use_container_width=True)
-
-        # B30 vs T30
-        geo = metrics[metrics["metric_name"].isin(["b30_t30_aum_share", "city_tier_aum_share"])].sort_values("period_date")
-        if not geo.empty:
-            c = alt.Chart(geo).mark_bar().encode(
-                x=alt.X("period_date:T", title=""),
-                y=alt.Y("value:Q", title="%"),
-                color=alt.Color("segment:N", title="Segment"),
-                tooltip=[alt.Tooltip("period_date:T", format="%b %Y"), alt.Tooltip("segment:N"), alt.Tooltip("value:Q", format=".1f")],
-            ).properties(height=250, title="B30 vs T30 / Geographic Split")
-            st.altair_chart(c, use_container_width=True)
-
-    # --- Global ---
-    with tabs[6]:
-        st.subheader("Global Comparison")
-        global_data = metrics[metrics["metric_name"] == "mf_aum_to_gdp_global"].sort_values("value", ascending=False)
-        if not global_data.empty:
-            c = alt.Chart(global_data).mark_bar(color="#60a5fa").encode(
-                x=alt.X("value:Q", title="AUM as % of GDP"),
-                y=alt.Y("segment:N", sort="-x", title=""),
-                tooltip=[alt.Tooltip("segment:N", title="Country"), alt.Tooltip("value:Q", format=".0f", title="AUM/GDP %")],
-            ).properties(height=len(global_data) * 25 + 50)
-            st.altair_chart(c, use_container_width=True)
-
-        cagr_data = metrics[metrics["metric_name"] == "regulated_net_assets_5yr_cagr"].sort_values("value", ascending=False)
-        if not cagr_data.empty:
-            c = alt.Chart(cagr_data).mark_bar(color="#4ade80").encode(
-                x=alt.X("value:Q", title="5-Year CAGR %"),
-                y=alt.Y("segment:N", sort="-x", title=""),
-                tooltip=[alt.Tooltip("segment:N", title="Country"), alt.Tooltip("value:Q", format=".1f", title="CAGR %")],
-            ).properties(height=len(cagr_data) * 25 + 50)
-            st.altair_chart(c, use_container_width=True)
-
-
-# =====================================================================
-# PAGE: GEOGRAPHY
-# =====================================================================
-
-elif page == "Geography":
-    st.title("Geography — State-wise Data")
-
-    state_df = load_state_data()
-    if state_df.empty:
-        st.warning("No state data available.")
-    else:
-        st.caption("Source: AMFI-CRISIL Factbook 2024 & AMFI Women's Day Report Mar 2025")
-
-        dim = st.selectbox("Select Dimension", ["Women's AUM Share", "Asset Allocation", "Age Groups"])
-
-        if dim == "Women's AUM Share":
-            wdata = state_df[state_df["dimension"] == "women_aum_pct"].sort_values("value_pct", ascending=False)
-            c = alt.Chart(wdata).mark_bar(color="#f472b6").encode(
-                x=alt.X("value_pct:Q", title="Women's Share of Individual AUM %"),
-                y=alt.Y("state:N", sort="-x", title=""),
-                tooltip=[alt.Tooltip("state:N"), alt.Tooltip("value_pct:Q", format=".1f", title="%")],
-            ).properties(height=len(wdata) * 20 + 50)
-            st.altair_chart(c, use_container_width=True)
-
-        elif dim == "Asset Allocation":
-            alloc = state_df[state_df["dimension"] == "asset_allocation"].copy()
-            if not alloc.empty:
-                alloc_colors = {"equity": "#4ade80", "debt": "#60a5fa", "hybrid": "#f59e0b", "passive": "#a78bfa", "others": "#94a3b8"}
-                c = alt.Chart(alloc).mark_bar().encode(
-                    x=alt.X("value_pct:Q", stack="normalize", title="Allocation %", axis=alt.Axis(format="%")),
-                    y=alt.Y("state:N", sort=alt.EncodingSortField(field="value_pct", op="sum", order="descending"), title=""),
-                    color=alt.Color("sub_dimension:N", title="Category",
-                                    scale=alt.Scale(domain=list(alloc_colors.keys()), range=list(alloc_colors.values()))),
-                    tooltip=[alt.Tooltip("state:N"), alt.Tooltip("sub_dimension:N", title="Category"), alt.Tooltip("value_pct:Q", format=".1f", title="%")],
-                ).properties(height=len(alloc["state"].unique()) * 20 + 50)
-                st.altair_chart(c, use_container_width=True)
-
-        elif dim == "Age Groups":
-            age = state_df[state_df["dimension"] == "age_group"].copy()
-            if not age.empty:
-                age_colors = {"below_25": "#4ade80", "25_to_44": "#60a5fa", "45_to_58": "#f59e0b", "above_58": "#f472b6", "not_specified": "#94a3b8"}
-                c = alt.Chart(age).mark_bar().encode(
-                    x=alt.X("value_pct:Q", stack="normalize", title="Age Distribution %", axis=alt.Axis(format="%")),
-                    y=alt.Y("state:N", sort=alt.EncodingSortField(field="value_pct", op="sum", order="descending"), title=""),
-                    color=alt.Color("sub_dimension:N", title="Age Group",
-                                    scale=alt.Scale(domain=list(age_colors.keys()), range=list(age_colors.values()))),
-                    tooltip=[alt.Tooltip("state:N"), alt.Tooltip("sub_dimension:N", title="Age Group"), alt.Tooltip("value_pct:Q", format=".1f", title="%")],
-                ).properties(height=len(age["state"].unique()) * 20 + 50)
-                st.altair_chart(c, use_container_width=True)
 
 
 # =====================================================================
