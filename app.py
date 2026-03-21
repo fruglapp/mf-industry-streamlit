@@ -216,6 +216,20 @@ latest_month = df["report_month"].max()
 prev_month = latest_month - pd.DateOffset(months=1)
 year_ago = latest_month - pd.DateOffset(months=12)
 
+# --- Shared group filter for Monthly Fact Sheet pages ---
+
+MONTHLY_PAGES = {"Industry Pulse", "Flows", "Categories"}
+
+if page in MONTHLY_PAGES:
+    if "_group_filter" not in st.session_state:
+        st.session_state["_group_filter"] = "All"
+    group_filter = st.radio(
+        "Filter by group", ["All"] + GROUPS, horizontal=True,
+        key="_group_filter",
+    )
+else:
+    group_filter = "All"
+
 
 # =====================================================================
 # PAGE: INDUSTRY PULSE
@@ -255,11 +269,8 @@ if page == "Industry Pulse":
                    delta=f"{fmt_num(r['num_folios'] - rp['num_folios'])} new" if rp is not None and not pd.isna(rp['num_folios']) else None)
         c6.metric("Schemes", f"{int(r['num_schemes']):,}" if not pd.isna(r["num_schemes"]) else "—")
 
-    # AUM trend — Altair with group filter
+    # AUM trend — uses shared group filter
     st.subheader("AUM Trend")
-    group_filter = st.radio(
-        "Filter by group", ["All"] + GROUPS, horizontal=True, key="pulse_group_filter"
-    )
 
     if group_filter == "All":
         aum_trend = (
@@ -361,8 +372,9 @@ elif page == "Flows":
 
     # Net flows by group — aggregate from sub-categories
     st.subheader("Net Flows by Group")
+    flow_groups = [group_filter] if group_filter != "All" else GROUPS
     flow_raw = df[
-        (df["report_month"] > cutoff) & (df["section"] == "Open Ended") & (df["group"].isin(GROUPS))
+        (df["report_month"] > cutoff) & (df["section"] == "Open Ended") & (df["group"].isin(flow_groups))
     ]
     flow_df = flow_raw.groupby(["report_month", "group"])["net_flow_cr"].sum().reset_index().rename(columns={"group": "category"})
 
@@ -382,7 +394,7 @@ elif page == "Flows":
     # Flow summary — latest month
     st.subheader("Latest Month Summary")
     latest_flow_raw = df[
-        (df["report_month"] == latest_month) & (df["section"] == "Open Ended") & (df["group"].isin(GROUPS))
+        (df["report_month"] == latest_month) & (df["section"] == "Open Ended") & (df["group"].isin(flow_groups))
     ]
     latest_flow = latest_flow_raw.groupby("group").agg(
         funds_mobilized_cr=("funds_mobilized_cr", "sum"),
@@ -407,6 +419,7 @@ elif page == "Flows":
     cat_flows = df[
         (df["report_month"] == latest_month)
         & (df["section"] == "Open Ended")
+        & (df["group"].isin(flow_groups))
         & (~df["category"].isin(GROUPS + ["Grand Total", "Total A-Open ended Schemes"]))
     ][["category", "net_flow_cr", "aum_cr"]].copy()
     cat_flows["flow_to_aum"] = (cat_flows["net_flow_cr"] / cat_flows["aum_cr"] * 100).round(2)
@@ -435,7 +448,8 @@ elif page == "Categories":
     st.title("Category Deep Dive")
     st.caption(f"Data as of {latest_month.strftime('%B %Y')}")
 
-    selected_group = st.selectbox("Select Group", GROUPS)
+    default_idx = GROUPS.index(group_filter) if group_filter in GROUPS else 0
+    selected_group = st.selectbox("Select Group", GROUPS, index=default_idx)
 
     # Sub-categories in this group
     cat_df = df[
