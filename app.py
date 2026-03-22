@@ -77,6 +77,22 @@ def load_qaaum_schemes():
 
 
 @st.cache_data(ttl=3600)
+def load_scheme_categories():
+    """Load scheme_code → category mapping from scheme_master."""
+    supabase = get_supabase()
+    all_data = []
+    offset = 0
+    page_size = 1000
+    while True:
+        result = supabase.table("scheme_master").select("scheme_code,category,asset_class").range(offset, offset + page_size - 1).execute()
+        all_data.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        offset += page_size
+    return pd.DataFrame(all_data)
+
+
+@st.cache_data(ttl=3600)
 def load_metrics():
     data = fetch_all("mf_industry_metrics", "period_date")
     df = pd.DataFrame(data)
@@ -645,7 +661,7 @@ elif page == "Market Share":
         s_latest = sdf["period_start"].max()
         st.caption(f"Scheme data as of {s_latest.strftime('%B %Y')} quarter")
 
-        stab1, stab2 = st.tabs(["Top Schemes", "AMC × Scheme Drill-down"])
+        stab1, stab2, stab3 = st.tabs(["Top Schemes", "AMC × Scheme Drill-down", "Category × AMC"])
 
         with stab1:
             top_s_n = st.slider("Top schemes", 10, 50, 25, key="top_schemes_n")
@@ -717,6 +733,68 @@ elif page == "Market Share":
                     ],
                 ).properties(height=300)
                 st.altair_chart(s_trend_chart, use_container_width=True)
+        with stab3:
+            # Category × AMC market share using scheme-level QAUM + scheme_master
+            cat_df = load_scheme_categories()
+            if not cat_df.empty:
+                # Join scheme QAUM with categories
+                s_latest_data = sdf[sdf["period_start"] == s_latest].copy()
+                merged = s_latest_data.merge(
+                    cat_df, left_on="amfi_code", right_on="scheme_code", how="left"
+                )
+                merged = merged.dropna(subset=["category"])
+
+                # Asset class filter
+                asset_classes = sorted(merged["asset_class"].dropna().unique())
+                sel_asset = st.selectbox("Asset class", ["All"] + asset_classes, key="cat_amc_asset")
+                if sel_asset != "All":
+                    merged = merged[merged["asset_class"] == sel_asset]
+
+                # Category filter
+                categories = sorted(merged["category"].dropna().unique())
+                sel_cat = st.selectbox("Category", categories, key="cat_amc_cat")
+
+                cat_data = merged[merged["category"] == sel_cat]
+                cat_total = cat_data["aaum_total_cr"].sum()
+
+                if cat_total > 0:
+                    # Aggregate by AMC
+                    amc_agg = (
+                        cat_data.groupby("mf_name")["aaum_total_cr"]
+                        .sum()
+                        .sort_values(ascending=False)
+                        .reset_index()
+                    )
+                    amc_agg["share"] = (amc_agg["aaum_total_cr"] / cat_total * 100).round(2)
+
+                    st.metric(f"{sel_cat} — Total QAUM", fmt_cr(cat_total))
+                    st.caption(f"{len(amc_agg)} fund houses")
+
+                    # Bar chart — top 15
+                    top_amc = amc_agg.head(15).copy()
+                    cat_bar = alt.Chart(top_amc).mark_bar(color="#4ade80").encode(
+                        x=alt.X("aaum_total_cr:Q", axis=y_axis_lakhs_cr("AAUM"), title="AAUM (Cr)"),
+                        y=alt.Y("mf_name:N", sort="-x", title=""),
+                        tooltip=[
+                            alt.Tooltip("mf_name:N", title="AMC"),
+                            alt.Tooltip("aaum_total_cr:Q", format=",.0f", title="AAUM (Cr)"),
+                            alt.Tooltip("share:Q", format=".2f", title="Market Share %"),
+                        ],
+                    ).properties(height=15 * 28 + 50)
+                    st.altair_chart(cat_bar, use_container_width=True)
+
+                    # Table
+                    display_amc = amc_agg[["mf_name", "aaum_total_cr", "share"]].copy()
+                    display_amc.columns = ["AMC", "AAUM (Cr)", "Market Share %"]
+                    st.dataframe(
+                        display_amc.style.format({"AAUM (Cr)": "{:,.0f}", "Market Share %": "{:.2f}%"}),
+                        use_container_width=True, hide_index=True,
+                    )
+                else:
+                    st.info(f"No data for {sel_cat}")
+            else:
+                st.info("Scheme category data not available.")
+
     else:
         st.info("Scheme-level QAUM data not yet loaded.")
 
