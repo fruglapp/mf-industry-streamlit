@@ -161,10 +161,39 @@ def fmt_num(val):
     return f"{val:,.0f}"
 
 
+def smart_round(val):
+    """Value-dependent rounding: >30→0dp, 10-30→1dp, 0-10→2dp."""
+    if pd.isna(val):
+        return "—"
+    a = abs(val)
+    if a > 30:
+        return f"{val:,.0f}"
+    elif a >= 10:
+        return f"{val:,.1f}"
+    else:
+        return f"{val:,.2f}"
+
+
+def smart_round_pct(val, signed=False):
+    """Smart-rounded percentage with % symbol."""
+    if pd.isna(val):
+        return "—"
+    a = abs(val)
+    if a > 30:
+        dp = 0
+    elif a >= 10:
+        dp = 1
+    else:
+        dp = 2
+    if signed:
+        return f"{val:+.{dp}f}%"
+    return f"{val:.{dp}f}%"
+
+
 def fmt_pct(val):
     if pd.isna(val):
         return "—"
-    return f"{val:+.1f}%"
+    return smart_round_pct(val, signed=True)
 
 
 def pct_change(new, old):
@@ -179,6 +208,20 @@ def y_axis_lakhs_cr(title=""):
         format="~s",
         labelExpr="datum.value >= 100000 ? format(datum.value / 100000, '.0f') + 'L Cr' : format(datum.value, ',.0f') + ' Cr'"
     )
+
+
+def bar_labels(chart, field, fmt=",.0f", color="#ffffff", font_size=11):
+    """Add data labels to a bar chart. Returns a layered chart."""
+    return chart + chart.mark_text(
+        align="center", dy=-10, fontSize=font_size, color=color,
+    ).encode(text=alt.Text(f"{field}:Q", format=fmt))
+
+
+def hbar_labels(chart, field, fmt=",.0f", color="#ffffff", font_size=11):
+    """Add data labels to a horizontal bar chart."""
+    return chart + chart.mark_text(
+        align="left", dx=4, fontSize=font_size, color=color,
+    ).encode(text=alt.Text(f"{field}:Q", format=fmt))
 
 
 GROUPS = ["Equity", "Debt", "Hybrid", "Solution Oriented", "Other"]
@@ -352,13 +395,23 @@ if page == "Industry Pulse":
     display = group_latest.sort_values("aum_cr", ascending=False)[
         ["category", "aum_cr", "share", "net_flow_cr", "yoy_growth", "num_folios"]
     ].copy()
+    # Add total row
+    total_row = pd.DataFrame([{
+        "category": "Total",
+        "aum_cr": group_latest["aum_cr"].sum(),
+        "share": 100.0,
+        "net_flow_cr": group_latest["net_flow_cr"].sum(),
+        "yoy_growth": pct_change(group_latest["aum_cr"].sum(), group_latest["aum_yoy"].sum()) if "aum_yoy" in group_latest.columns else None,
+        "num_folios": group_latest["num_folios"].sum(),
+    }])
+    display = pd.concat([display, total_row[["category", "aum_cr", "share", "net_flow_cr", "yoy_growth", "num_folios"]]], ignore_index=True)
     display.columns = ["Group", "AUM (Cr)", "Share %", "Net Flow (Cr)", "YoY Growth %", "Folios"]
     st.dataframe(
         display.style.format({
             "AUM (Cr)": "{:,.0f}",
-            "Share %": "{:.1f}%",
+            "Share %": lambda v: smart_round_pct(v),
             "Net Flow (Cr)": "{:,.0f}",
-            "YoY Growth %": "{:+.1f}%",
+            "YoY Growth %": lambda v: smart_round_pct(v, signed=True),
             "Folios": "{:,.0f}",
         }),
         use_container_width=True, hide_index=True,
@@ -430,13 +483,20 @@ elif page == "Flows":
     ).reset_index().rename(columns={"group": "category"})
     latest_flow["redemption_ratio"] = (latest_flow["redemption_cr"] / latest_flow["funds_mobilized_cr"] * 100).round(1)
     latest_flow = latest_flow.sort_values("net_flow_cr", ascending=False)
+    # Add total row
+    total_gross = latest_flow["funds_mobilized_cr"].sum()
+    total_redem = latest_flow["redemption_cr"].sum()
+    total_net = latest_flow["net_flow_cr"].sum()
+    total_ratio = (total_redem / total_gross * 100) if total_gross > 0 else 0
+    total_row = pd.DataFrame([{"category": "Total", "funds_mobilized_cr": total_gross, "redemption_cr": total_redem, "net_flow_cr": total_net, "redemption_ratio": total_ratio}])
+    latest_flow = pd.concat([latest_flow, total_row], ignore_index=True)
     latest_flow.columns = ["Group", "Gross Sales (Cr)", "Redemptions (Cr)", "Net Flow (Cr)", "Redemption Ratio %"]
     st.dataframe(
         latest_flow.style.format({
             "Gross Sales (Cr)": "{:,.0f}",
             "Redemptions (Cr)": "{:,.0f}",
             "Net Flow (Cr)": "{:,.0f}",
-            "Redemption Ratio %": "{:.1f}%",
+            "Redemption Ratio %": lambda v: smart_round_pct(v),
         }),
         use_container_width=True, hide_index=True,
     )
@@ -457,13 +517,13 @@ elif page == "Flows":
         st.markdown("**Top 5 Inflows**")
         top5 = cat_flows.head(5)[["category", "net_flow_cr", "flow_to_aum"]].copy()
         top5.columns = ["Category", "Net Flow (Cr)", "Flow/AUM %"]
-        st.dataframe(top5.style.format({"Net Flow (Cr)": "{:,.0f}", "Flow/AUM %": "{:.2f}%"}),
+        st.dataframe(top5.style.format({"Net Flow (Cr)": "{:,.0f}", "Flow/AUM %": lambda v: smart_round_pct(v)}),
                      use_container_width=True, hide_index=True)
     with col2:
         st.markdown("**Top 5 Outflows**")
         bot5 = cat_flows.tail(5).sort_values("net_flow_cr")[["category", "net_flow_cr", "flow_to_aum"]].copy()
         bot5.columns = ["Category", "Net Flow (Cr)", "Flow/AUM %"]
-        st.dataframe(bot5.style.format({"Net Flow (Cr)": "{:,.0f}", "Flow/AUM %": "{:.2f}%"}),
+        st.dataframe(bot5.style.format({"Net Flow (Cr)": "{:,.0f}", "Flow/AUM %": lambda v: smart_round_pct(v)}),
                      use_container_width=True, hide_index=True)
 
 
@@ -504,11 +564,22 @@ elif page == "Categories":
         cat_df = cat_df.sort_values("aum_cr", ascending=False)
 
         display = cat_df[["category", "aum_cr", "share", "net_flow_cr", "yoy", "num_folios", "num_schemes"]].copy()
+        # Add total row
+        total_yoy = pct_change(cat_df["aum_cr"].sum(), cat_df["aum_yoy"].sum()) if "aum_yoy" in cat_df.columns else None
+        total_cat = pd.DataFrame([{
+            "category": "Total", "aum_cr": cat_df["aum_cr"].sum(), "share": 100.0,
+            "net_flow_cr": cat_df["net_flow_cr"].sum(), "yoy": total_yoy,
+            "num_folios": cat_df["num_folios"].sum(), "num_schemes": cat_df["num_schemes"].sum(),
+        }])
+        display = pd.concat([display, total_cat], ignore_index=True)
         display.columns = ["Category", "AUM (Cr)", "Share %", "Net Flow (Cr)", "YoY %", "Folios", "Schemes"]
         st.dataframe(
             display.style.format({
-                "AUM (Cr)": "{:,.0f}", "Share %": "{:.1f}%", "Net Flow (Cr)": "{:,.0f}",
-                "YoY %": "{:+.1f}%", "Folios": "{:,.0f}", "Schemes": "{:,.0f}",
+                "AUM (Cr)": "{:,.0f}",
+                "Share %": lambda v: smart_round_pct(v),
+                "Net Flow (Cr)": "{:,.0f}",
+                "YoY %": lambda v: smart_round_pct(v, signed=True),
+                "Folios": "{:,.0f}", "Schemes": "{:,.0f}",
             }),
             use_container_width=True, hide_index=True,
         )
@@ -583,7 +654,8 @@ elif page == "Market Share":
     else:
         top["share_change"] = 0
 
-    # Bar chart
+    # Bar chart with data labels
+    top["label"] = top["aaum_total_cr"].apply(lambda v: fmt_cr_short(v))
     bar = alt.Chart(top).mark_bar(color="#4ade80").encode(
         x=alt.X("aaum_total_cr:Q", axis=y_axis_lakhs_cr("AAUM"), title="AAUM"),
         y=alt.Y("fund_house:N", sort="-x", title=""),
@@ -593,15 +665,28 @@ elif page == "Market Share":
             alt.Tooltip("share:Q", format=".2f", title="Market Share %"),
         ],
     ).properties(height=top_n * 28 + 50)
-    st.altair_chart(bar, use_container_width=True)
+    bar_text = bar.mark_text(align="left", dx=4, fontSize=11, color="#ffffff").encode(
+        text="label:N",
+    )
+    st.altair_chart(bar + bar_text, use_container_width=True)
 
     # Table
     display_q = top[["fund_house", "aaum_total_cr", "share", "share_change"]].copy()
+    # Add total row for top N
+    total_row_q = pd.DataFrame([{
+        "fund_house": f"Total (Top {top_n})",
+        "aaum_total_cr": top["aaum_total_cr"].sum(),
+        "share": top["share"].sum(),
+        "share_change": top["share_change"].sum() if "share_change" in top.columns else 0,
+    }])
+    display_q = pd.concat([display_q, total_row_q], ignore_index=True)
     display_q.columns = ["Fund House", "AAUM (Cr)", "Share %", "Change (bps)"]
     display_q["Change (bps)"] = (display_q["Change (bps)"] * 100).round(0)
     st.dataframe(
         display_q.style.format({
-            "AAUM (Cr)": "{:,.0f}", "Share %": "{:.2f}%", "Change (bps)": "{:+.0f}",
+            "AAUM (Cr)": "{:,.0f}",
+            "Share %": lambda v: smart_round_pct(v),
+            "Change (bps)": "{:+.0f}",
         }),
         use_container_width=True, hide_index=True,
     )
@@ -669,6 +754,7 @@ elif page == "Market Share":
             top_schemes = s_latest_data.head(top_s_n).copy()
             top_schemes["display_name"] = top_schemes["scheme_name"].str[:60]
 
+            top_schemes["label"] = top_schemes["aaum_total_cr"].apply(lambda v: fmt_cr_short(v))
             s_bar = alt.Chart(top_schemes).mark_bar(color="#60a5fa").encode(
                 x=alt.X("aaum_total_cr:Q", axis=y_axis_lakhs_cr("AAUM"), title="AAUM (Cr)"),
                 y=alt.Y("display_name:N", sort="-x", title=""),
@@ -679,15 +765,23 @@ elif page == "Market Share":
                     alt.Tooltip("aaum_total_cr:Q", format=",.0f", title="AAUM (Cr)"),
                 ],
             ).properties(height=top_s_n * 22 + 50)
-            st.altair_chart(s_bar, use_container_width=True)
+            s_text = s_bar.mark_text(align="left", dx=4, fontSize=10, color="#ffffff").encode(text="label:N")
+            st.altair_chart(s_bar + s_text, use_container_width=True)
 
             # Table
             s_table = top_schemes[["scheme_name", "mf_name", "aaum_total_cr"]].copy()
             s_total = s_latest_data["aaum_total_cr"].sum()
             s_table["share"] = (s_table["aaum_total_cr"] / s_total * 100).round(2)
+            # Add total row
+            s_total_row = pd.DataFrame([{
+                "scheme_name": f"Total (Top {top_s_n})", "mf_name": "",
+                "aaum_total_cr": s_table["aaum_total_cr"].sum(),
+                "share": s_table["share"].sum(),
+            }])
+            s_table = pd.concat([s_table, s_total_row], ignore_index=True)
             s_table.columns = ["Scheme", "AMC", "AAUM (Cr)", "Share %"]
             st.dataframe(
-                s_table.style.format({"AAUM (Cr)": "{:,.0f}", "Share %": "{:.2f}%"}),
+                s_table.style.format({"AAUM (Cr)": "{:,.0f}", "Share %": lambda v: smart_round_pct(v)}),
                 use_container_width=True, hide_index=True,
             )
 
@@ -706,6 +800,7 @@ elif page == "Market Share":
             # Show top schemes for this AMC
             amc_top = amc_schemes.head(20).copy()
             amc_top["display_name"] = amc_top["scheme_name"].str[:50]
+            amc_top["label"] = amc_top["aaum_total_cr"].apply(lambda v: fmt_cr_short(v))
             amc_bar = alt.Chart(amc_top).mark_bar(color="#4ade80").encode(
                 x=alt.X("aaum_total_cr:Q", title="AAUM (Cr)"),
                 y=alt.Y("display_name:N", sort="-x", title=""),
@@ -714,7 +809,8 @@ elif page == "Market Share":
                     alt.Tooltip("aaum_total_cr:Q", format=",.0f", title="AAUM (Cr)"),
                 ],
             ).properties(height=20 * 22 + 50)
-            st.altair_chart(amc_bar, use_container_width=True)
+            amc_text = amc_bar.mark_text(align="left", dx=4, fontSize=10, color="#ffffff").encode(text="label:N")
+            st.altair_chart(amc_bar + amc_text, use_container_width=True)
 
             # Scheme trend — select specific schemes to compare over quarters
             amc_scheme_names = amc_schemes["scheme_name"].tolist()[:10]
@@ -770,8 +866,9 @@ elif page == "Market Share":
                     st.metric(f"{sel_cat} — Total QAUM", fmt_cr(cat_total))
                     st.caption(f"{len(amc_agg)} fund houses")
 
-                    # Bar chart — top 15
+                    # Bar chart — top 15 with labels
                     top_amc = amc_agg.head(15).copy()
+                    top_amc["label"] = top_amc["aaum_total_cr"].apply(lambda v: fmt_cr_short(v))
                     cat_bar = alt.Chart(top_amc).mark_bar(color="#4ade80").encode(
                         x=alt.X("aaum_total_cr:Q", axis=y_axis_lakhs_cr("AAUM"), title="AAUM (Cr)"),
                         y=alt.Y("mf_name:N", sort="-x", title=""),
@@ -781,13 +878,19 @@ elif page == "Market Share":
                             alt.Tooltip("share:Q", format=".2f", title="Market Share %"),
                         ],
                     ).properties(height=15 * 28 + 50)
-                    st.altair_chart(cat_bar, use_container_width=True)
+                    cat_text = cat_bar.mark_text(align="left", dx=4, fontSize=11, color="#ffffff").encode(text="label:N")
+                    st.altair_chart(cat_bar + cat_text, use_container_width=True)
 
-                    # Table
+                    # Table with total
                     display_amc = amc_agg[["mf_name", "aaum_total_cr", "share"]].copy()
+                    amc_total_row = pd.DataFrame([{
+                        "mf_name": "Total", "aaum_total_cr": amc_agg["aaum_total_cr"].sum(),
+                        "share": amc_agg["share"].sum(),
+                    }])
+                    display_amc = pd.concat([display_amc, amc_total_row], ignore_index=True)
                     display_amc.columns = ["AMC", "AAUM (Cr)", "Market Share %"]
                     st.dataframe(
-                        display_amc.style.format({"AAUM (Cr)": "{:,.0f}", "Market Share %": "{:.2f}%"}),
+                        display_amc.style.format({"AAUM (Cr)": "{:,.0f}", "Market Share %": lambda v: smart_round_pct(v)}),
                         use_container_width=True, hide_index=True,
                     )
                 else:
@@ -905,9 +1008,9 @@ elif page == "MAAUM":
         st.dataframe(
             comp_df.style.format({
                 "AUM (Cr)": "{:,.0f}",
-                "Active%": "{:.1f}%", "Equity%": "{:.1f}%", "Debt%": "{:.1f}%",
-                "ETF%": "{:.1f}%", "Individual%": "{:.1f}%", "B30%": "{:.1f}%",
-                "Direct%": "{:.1f}%", "Assoc Dist%": "{:.1f}%", "Non-Assoc%": "{:.1f}%",
+                "Active%": lambda v: smart_round_pct(v), "Equity%": lambda v: smart_round_pct(v), "Debt%": lambda v: smart_round_pct(v),
+                "ETF%": lambda v: smart_round_pct(v), "Individual%": lambda v: smart_round_pct(v), "B30%": lambda v: smart_round_pct(v),
+                "Direct%": lambda v: smart_round_pct(v), "Assoc Dist%": lambda v: smart_round_pct(v), "Non-Assoc%": lambda v: smart_round_pct(v),
             }),
             use_container_width=True, hide_index=True,
         )
@@ -954,8 +1057,8 @@ elif page == "MAAUM":
 
         st.dataframe(
             display_rank.style.format({
-                "AUM (Cr)": "{:,.0f}", "Market Share%": "{:.2f}%",
-                "AUM Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+                "AUM (Cr)": "{:,.0f}", "Market Share%": lambda v: smart_round_pct(v),
+                "AUM Growth (Cr)": "{:,.0f}", "Growth Share%": lambda v: smart_round_pct(v),
             }),
             use_container_width=True, hide_index=True,
         )
@@ -963,6 +1066,7 @@ elif page == "MAAUM":
         # Horizontal bar chart — top 15
         bar_data = rank_df.head(15).copy()
         bar_data["mf_name"] = bar_data["mf_name"].str.replace(" Mutual Fund", " MF")
+        bar_data["label"] = bar_data["aum"].apply(lambda v: fmt_cr_short(v))
         bar = alt.Chart(bar_data).mark_bar(color="#4ade80").encode(
             x=alt.X("aum:Q", axis=y_axis_lakhs_cr("AUM"), title="AUM (Cr)"),
             y=alt.Y("mf_name:N", sort="-x", title=""),
@@ -972,7 +1076,8 @@ elif page == "MAAUM":
                 alt.Tooltip("share:Q", format=".2f", title="Share %"),
             ],
         ).properties(height=15 * 28 + 50)
-        st.altair_chart(bar, use_container_width=True)
+        bar_text = bar.mark_text(align="left", dx=4, fontSize=11, color="#ffffff").encode(text="label:N")
+        st.altair_chart(bar + bar_text, use_container_width=True)
 
     # ---- Tab 3: Asset ----
     with tabs[2]:
@@ -1032,8 +1137,8 @@ elif page == "MAAUM":
         ap_df = build_asset_table("Type", ap_map, sel_mf_id, asset_start, asset_end)
         st.dataframe(ap_df.style.format({
             "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
-            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
-            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+            "Market Share%": lambda v: smart_round_pct(v), "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": lambda v: smart_round_pct(v),
         }), use_container_width=True, hide_index=True)
 
         # Asset Class
@@ -1044,8 +1149,8 @@ elif page == "MAAUM":
         ac_df = ac_df[ac_df["AMC AUM (Cr)"] > 0]
         st.dataframe(ac_df.style.format({
             "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
-            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
-            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+            "Market Share%": lambda v: smart_round_pct(v), "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": lambda v: smart_round_pct(v),
         }), use_container_width=True, hide_index=True)
 
     # ---- Tab 4: Scheme Category ----
@@ -1098,8 +1203,8 @@ elif page == "MAAUM":
         cat_df = pd.DataFrame(cat_rows).sort_values("AMC AUM (Cr)", ascending=False)
         st.dataframe(cat_df.style.format({
             "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
-            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
-            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+            "Market Share%": lambda v: smart_round_pct(v), "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": lambda v: smart_round_pct(v),
         }), use_container_width=True, hide_index=True)
 
     # ---- Tab 5: Investor Type ----
@@ -1149,8 +1254,8 @@ elif page == "MAAUM":
         ii_df = pd.DataFrame(ii_rows)
         st.dataframe(ii_df.style.format({
             "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
-            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
-            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+            "Market Share%": lambda v: smart_round_pct(v), "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": lambda v: smart_round_pct(v),
         }), use_container_width=True, hide_index=True)
 
         # 5 investor types
@@ -1183,8 +1288,8 @@ elif page == "MAAUM":
         inv_df = pd.DataFrame(inv_rows).sort_values("AMC AUM (Cr)", ascending=False)
         st.dataframe(inv_df.style.format({
             "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
-            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
-            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+            "Market Share%": lambda v: smart_round_pct(v), "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": lambda v: smart_round_pct(v),
         }), use_container_width=True, hide_index=True)
 
         # Donut chart for investor composition
@@ -1229,8 +1334,8 @@ elif page == "MAAUM":
         dr_df = build_asset_table("Channel", dr_map, sel_mf_id_dist, dist_start, dist_end)
         st.dataframe(dr_df.style.format({
             "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
-            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
-            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+            "Market Share%": lambda v: smart_round_pct(v), "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": lambda v: smart_round_pct(v),
         }), use_container_width=True, hide_index=True)
 
         # 3 channels
@@ -1240,8 +1345,8 @@ elif page == "MAAUM":
         ch_df = build_asset_table("Channel", ch_map, sel_mf_id_dist, dist_start, dist_end)
         st.dataframe(ch_df.style.format({
             "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
-            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
-            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+            "Market Share%": lambda v: smart_round_pct(v), "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": lambda v: smart_round_pct(v),
         }), use_container_width=True, hide_index=True)
 
         # T30 / B30
@@ -1253,8 +1358,8 @@ elif page == "MAAUM":
         geo_df = build_asset_table("Geography", geo_map, sel_mf_id_dist, dist_start, dist_end)
         st.dataframe(geo_df.style.format({
             "AMC AUM (Cr)": "{:,.0f}", "Industry AUM (Cr)": "{:,.0f}",
-            "Market Share%": "{:.2f}%", "AMC Growth (Cr)": "{:,.0f}",
-            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": "{:.2f}%",
+            "Market Share%": lambda v: smart_round_pct(v), "AMC Growth (Cr)": "{:,.0f}",
+            "Industry Growth (Cr)": "{:,.0f}", "Growth Share%": lambda v: smart_round_pct(v),
         }), use_container_width=True, hide_index=True)
 
     # ---- Tab 7: Composition Trend ----
@@ -1347,7 +1452,7 @@ elif page == "MAAUM":
 
         trend_df = pd.DataFrame(trend_rows)
         month_cols = [c for c in trend_df.columns if c != "AMC"]
-        fmt_dict = {c: "{:.1f}%" for c in month_cols}
+        fmt_dict = {c: (lambda v: smart_round_pct(v)) for c in month_cols}
         st.dataframe(
             trend_df.style.format(fmt_dict),
             use_container_width=True, hide_index=True,
