@@ -7,12 +7,98 @@ import os
 
 load_dotenv()
 
+# --- Mobile-friendly Altair theme ---
+
+def _mobile_theme():
+    return {
+        "config": {
+            "axis": {
+                "labelFontSize": 12,
+                "titleFontSize": 13,
+                "labelLimit": 200,
+            },
+            "axisX": {
+                "labelAngle": 0,
+                "labelOverlap": "greedy",
+            },
+            "axisY": {
+                "labelAngle": 0,
+            },
+            "legend": {
+                "labelFontSize": 12,
+                "titleFontSize": 13,
+                "symbolSize": 100,
+                "labelLimit": 180,
+                "orient": "bottom",
+                "direction": "horizontal",
+                "titleOrient": "left",
+            },
+            "title": {
+                "fontSize": 15,
+                "anchor": "start",
+            },
+            "text": {
+                "fontSize": 13,
+            },
+            "arc": {
+                "innerRadius": 50,
+            },
+            "view": {
+                "continuousWidth": 300,
+            },
+        }
+    }
+
+
+alt.themes.register("mobile_friendly", _mobile_theme)
+alt.themes.enable("mobile_friendly")
+
 st.set_page_config(
     page_title="MF Industry",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
+
+# --- Mobile-friendly CSS ---
+
+st.markdown("""
+<style>
+/* Mobile layout fixes */
+@media (max-width: 768px) {
+    .main .block-container {
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
+        max-width: 100%;
+    }
+    /* Larger touch targets */
+    .stButton > button {
+        min-height: 44px;
+        font-size: 14px;
+    }
+    /* Tab labels */
+    .stTabs [data-baseweb="tab"] {
+        font-size: 13px;
+        padding: 10px 8px;
+    }
+    /* Metric values */
+    [data-testid="stMetricValue"] {
+        font-size: 1.3rem;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 0.85rem;
+    }
+}
+/* Charts: ensure no horizontal overflow */
+.vega-embed {
+    width: 100% !important;
+}
+/* Horizontal scroll for wide dataframes */
+[data-testid="stDataFrame"] {
+    overflow-x: auto;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # --- Supabase ---
 
@@ -210,17 +296,17 @@ def y_axis_lakhs_cr(title=""):
     )
 
 
-def bar_labels(chart, field, fmt=",.0f", color="#ffffff", font_size=11):
+def bar_labels(chart, field, fmt=",.0f", color="#ffffff", font_size=13):
     """Add data labels to a bar chart. Returns a layered chart."""
     return chart + chart.mark_text(
-        align="center", dy=-10, fontSize=font_size, color=color,
+        align="center", dy=-12, fontSize=font_size, color=color,
     ).encode(text=alt.Text(f"{field}:Q", format=fmt))
 
 
-def hbar_labels(chart, field, fmt=",.0f", color="#ffffff", font_size=11):
+def hbar_labels(chart, field, fmt=",.0f", color="#ffffff", font_size=13):
     """Add data labels to a horizontal bar chart."""
     return chart + chart.mark_text(
-        align="left", dx=4, fontSize=font_size, color=color,
+        align="left", dx=5, fontSize=font_size, color=color,
     ).encode(text=alt.Text(f"{field}:Q", format=fmt))
 
 
@@ -429,7 +515,8 @@ if page == "Industry Pulse":
         x=alt.X("report_month:T", title=""),
         y=alt.Y("share:Q", stack="normalize", title="Share of AUM", axis=alt.Axis(format="%")),
         color=alt.Color("category:N", title="Group",
-                        scale=alt.Scale(domain=list(GROUP_COLORS.keys()), range=list(GROUP_COLORS.values()))),
+                        scale=alt.Scale(domain=list(GROUP_COLORS.keys()), range=list(GROUP_COLORS.values())),
+                        legend=alt.Legend(orient="bottom", direction="horizontal")),
         tooltip=[
             alt.Tooltip("report_month:T", format="%B %Y", title="Month"),
             alt.Tooltip("category:N", title="Group"),
@@ -462,7 +549,8 @@ elif page == "Flows":
         x=alt.X("yearmonth(report_month):T", title=""),
         y=alt.Y("net_flow_cr:Q", axis=y_axis_lakhs_cr("Net Flow")),
         color=alt.Color("category:N", title="Group",
-                        scale=alt.Scale(domain=list(GROUP_COLORS.keys()), range=list(GROUP_COLORS.values()))),
+                        scale=alt.Scale(domain=list(GROUP_COLORS.keys()), range=list(GROUP_COLORS.values())),
+                        legend=alt.Legend(orient="bottom", direction="horizontal")),
         tooltip=[
             alt.Tooltip("report_month:T", format="%B %Y"),
             alt.Tooltip("category:N", title="Group"),
@@ -592,21 +680,19 @@ elif page == "Categories":
             .sort_values("report_month")[["report_month", "aum_cr", "net_flow_cr"]]
         )
 
-        col1, col2 = st.columns(2)
-        with col1:
-            aum_chart = alt.Chart(cat_trend).mark_area(color="#4ade80", opacity=0.5, line={"color": "#4ade80"}).encode(
-                x=alt.X("report_month:T", title=""),
-                y=alt.Y("aum_cr:Q", axis=y_axis_lakhs_cr("AUM")),
-                tooltip=[alt.Tooltip("report_month:T", format="%B %Y"), alt.Tooltip("aum_cr:Q", format=",.0f", title="AUM (Cr)")],
-            ).properties(height=250, title="AUM")
-            st.altair_chart(aum_chart, use_container_width=True)
-        with col2:
-            flow_chart = alt.Chart(cat_trend).mark_bar(color="#60a5fa").encode(
-                x=alt.X("report_month:T", title=""),
-                y=alt.Y("net_flow_cr:Q", axis=y_axis_lakhs_cr("Net Flow")),
-                tooltip=[alt.Tooltip("report_month:T", format="%B %Y"), alt.Tooltip("net_flow_cr:Q", format=",.0f", title="Net Flow (Cr)")],
-            ).properties(height=250, title="Net Flows")
-            st.altair_chart(flow_chart, use_container_width=True)
+        aum_chart = alt.Chart(cat_trend).mark_area(color="#4ade80", opacity=0.5, line={"color": "#4ade80"}).encode(
+            x=alt.X("report_month:T", title=""),
+            y=alt.Y("aum_cr:Q", axis=y_axis_lakhs_cr("AUM")),
+            tooltip=[alt.Tooltip("report_month:T", format="%B %Y"), alt.Tooltip("aum_cr:Q", format=",.0f", title="AUM (Cr)")],
+        ).properties(height=280, title="AUM")
+        st.altair_chart(aum_chart, use_container_width=True)
+
+        flow_chart = alt.Chart(cat_trend).mark_bar(color="#60a5fa").encode(
+            x=alt.X("report_month:T", title=""),
+            y=alt.Y("net_flow_cr:Q", axis=y_axis_lakhs_cr("Net Flow")),
+            tooltip=[alt.Tooltip("report_month:T", format="%B %Y"), alt.Tooltip("net_flow_cr:Q", format=",.0f", title="Net Flow (Cr)")],
+        ).properties(height=280, title="Net Flows")
+        st.altair_chart(flow_chart, use_container_width=True)
 
         # Share of total industry AUM over time
         st.subheader(f"{selected_cat} — Share of Industry AUM")
@@ -616,11 +702,11 @@ elif page == "Categories":
         gt_aum = df[df["category"] == "Grand Total"][["report_month", "aum_cr"]].rename(columns={"aum_cr": "total_aum"})
         cat_share = cat_share.merge(gt_aum, on="report_month")
         cat_share["share"] = (cat_share["aum_cr"] / cat_share["total_aum"] * 100).round(2)
-        share_chart = alt.Chart(cat_share).mark_line(color="#f59e0b", strokeWidth=2).encode(
+        share_chart = alt.Chart(cat_share).mark_line(color="#f59e0b", strokeWidth=2.5).encode(
             x=alt.X("report_month:T", title=""),
             y=alt.Y("share:Q", title="Share of Industry %", scale=alt.Scale(zero=False)),
             tooltip=[alt.Tooltip("report_month:T", format="%B %Y"), alt.Tooltip("share:Q", format=".2f", title="Share %")],
-        ).properties(height=200)
+        ).properties(height=280)
         st.altair_chart(share_chart, use_container_width=True)
 
 
@@ -664,8 +750,8 @@ elif page == "Market Share":
             alt.Tooltip("aaum_total_cr:Q", format=",.0f", title="AAUM (Cr)"),
             alt.Tooltip("share:Q", format=".2f", title="Market Share %"),
         ],
-    ).properties(height=top_n * 28 + 50)
-    bar_text = bar.mark_text(align="left", dx=4, fontSize=11, color="#ffffff").encode(
+    ).properties(height=top_n * 34 + 60)
+    bar_text = bar.mark_text(align="left", dx=5, fontSize=13, color="#ffffff").encode(
         text="label:N",
     )
     st.altair_chart(bar + bar_text, use_container_width=True)
@@ -704,10 +790,11 @@ elif page == "Market Share":
     conc_df = pd.DataFrame(concentration)
     conc_melt = conc_df.melt(id_vars="period", var_name="Metric", value_name="Share %")
 
-    conc_chart = alt.Chart(conc_melt).mark_line(strokeWidth=2).encode(
+    conc_chart = alt.Chart(conc_melt).mark_line(strokeWidth=2.5).encode(
         x=alt.X("period:T", title=""),
         y=alt.Y("Share %:Q", title="Share of Industry AUM %", scale=alt.Scale(zero=False)),
-        color=alt.Color("Metric:N", scale=alt.Scale(domain=["Top 5", "Top 10"], range=["#4ade80", "#60a5fa"])),
+        color=alt.Color("Metric:N", scale=alt.Scale(domain=["Top 5", "Top 10"], range=["#4ade80", "#60a5fa"]),
+                        legend=alt.Legend(orient="bottom", direction="horizontal")),
         tooltip=[
             alt.Tooltip("period:T", format="%B %Y"),
             alt.Tooltip("Metric:N"),
@@ -725,10 +812,11 @@ elif page == "Market Share":
 
     if selected_houses:
         compare = qdf[qdf["fund_house"].isin(selected_houses)].sort_values("period_start")
-        compare_chart = alt.Chart(compare).mark_line(strokeWidth=2).encode(
+        compare_chart = alt.Chart(compare).mark_line(strokeWidth=2.5).encode(
             x=alt.X("period_start:T", title=""),
             y=alt.Y("aaum_total_cr:Q", axis=y_axis_lakhs_cr("AAUM")),
-            color=alt.Color("fund_house:N", title="Fund House"),
+            color=alt.Color("fund_house:N", title="Fund House",
+                            legend=alt.Legend(orient="bottom", direction="horizontal")),
             tooltip=[
                 alt.Tooltip("period_start:T", format="%B %Y"),
                 alt.Tooltip("fund_house:N"),
@@ -764,8 +852,8 @@ elif page == "Market Share":
                     alt.Tooltip("mf_name:N", title="AMC"),
                     alt.Tooltip("aaum_total_cr:Q", format=",.0f", title="AAUM (Cr)"),
                 ],
-            ).properties(height=top_s_n * 22 + 50)
-            s_text = s_bar.mark_text(align="left", dx=4, fontSize=10, color="#ffffff").encode(text="label:N")
+            ).properties(height=top_s_n * 30 + 60)
+            s_text = s_bar.mark_text(align="left", dx=5, fontSize=13, color="#ffffff").encode(text="label:N")
             st.altair_chart(s_bar + s_text, use_container_width=True)
 
             # Table
@@ -808,8 +896,8 @@ elif page == "Market Share":
                     alt.Tooltip("scheme_name:N", title="Scheme"),
                     alt.Tooltip("aaum_total_cr:Q", format=",.0f", title="AAUM (Cr)"),
                 ],
-            ).properties(height=20 * 22 + 50)
-            amc_text = amc_bar.mark_text(align="left", dx=4, fontSize=10, color="#ffffff").encode(text="label:N")
+            ).properties(height=20 * 30 + 60)
+            amc_text = amc_bar.mark_text(align="left", dx=5, fontSize=13, color="#ffffff").encode(text="label:N")
             st.altair_chart(amc_bar + amc_text, use_container_width=True)
 
             # Scheme trend — select specific schemes to compare over quarters
@@ -818,10 +906,11 @@ elif page == "Market Share":
             if sel_schemes:
                 s_trend = sdf[(sdf["mf_name"] == sel_amc) & (sdf["scheme_name"].isin(sel_schemes))].sort_values("period_start")
                 s_trend["short_name"] = s_trend["scheme_name"].str[:40]
-                s_trend_chart = alt.Chart(s_trend).mark_line(strokeWidth=2).encode(
+                s_trend_chart = alt.Chart(s_trend).mark_line(strokeWidth=2.5).encode(
                     x=alt.X("period_start:T", title=""),
                     y=alt.Y("aaum_total_cr:Q", title="AAUM (Cr)"),
-                    color=alt.Color("short_name:N", title="Scheme"),
+                    color=alt.Color("short_name:N", title="Scheme",
+                                    legend=alt.Legend(orient="bottom", direction="horizontal")),
                     tooltip=[
                         alt.Tooltip("period_start:T", format="%B %Y"),
                         alt.Tooltip("scheme_name:N"),
@@ -877,8 +966,8 @@ elif page == "Market Share":
                             alt.Tooltip("aaum_total_cr:Q", format=",.0f", title="AAUM (Cr)"),
                             alt.Tooltip("share:Q", format=".2f", title="Market Share %"),
                         ],
-                    ).properties(height=15 * 28 + 50)
-                    cat_text = cat_bar.mark_text(align="left", dx=4, fontSize=11, color="#ffffff").encode(text="label:N")
+                    ).properties(height=15 * 34 + 60)
+                    cat_text = cat_bar.mark_text(align="left", dx=5, fontSize=13, color="#ffffff").encode(text="label:N")
                     st.altair_chart(cat_bar + cat_text, use_container_width=True)
 
                     # Table with total
@@ -1075,8 +1164,8 @@ elif page == "MAAUM":
                 alt.Tooltip("aum:Q", format=",.0f", title="AUM (Cr)"),
                 alt.Tooltip("share:Q", format=".2f", title="Share %"),
             ],
-        ).properties(height=15 * 28 + 50)
-        bar_text = bar.mark_text(align="left", dx=4, fontSize=11, color="#ffffff").encode(text="label:N")
+        ).properties(height=15 * 34 + 60)
+        bar_text = bar.mark_text(align="left", dx=5, fontSize=13, color="#ffffff").encode(text="label:N")
         st.altair_chart(bar + bar_text, use_container_width=True)
 
     # ---- Tab 3: Asset ----
@@ -1303,7 +1392,7 @@ elif page == "MAAUM":
             color=alt.Color("Type:N", scale=alt.Scale(
                 domain=["HNI", "Corporates", "Retail", "Banks/FIs", "FIIs/FPIs"],
                 range=["#4ade80", "#60a5fa", "#f59e0b", "#a78bfa", "#f472b6"]
-            )),
+            ), legend=alt.Legend(orient="bottom", direction="horizontal")),
             tooltip=[alt.Tooltip("Type:N"), alt.Tooltip("AUM:Q", format=",.0f", title="AUM (Cr)")],
         ).properties(height=300, title="Investor Composition")
         st.altair_chart(donut, use_container_width=True)
@@ -1545,31 +1634,28 @@ elif page == "Scheme Portfolios":
                     cap_grp.columns = ["Market Cap", "% to NAV"]
                     cap_grp = cap_grp.sort_values("% to NAV", ascending=False)
 
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        st.markdown("**Market Cap Breakdown**")
-                        cap_chart = alt.Chart(cap_grp).mark_bar(cornerRadiusEnd=4).encode(
-                            x=alt.X("% to NAV:Q", title="% to NAV"),
-                            y=alt.Y("Market Cap:N", sort="-x", title=""),
-                            color=alt.Color("Market Cap:N", scale=alt.Scale(
-                                domain=list(CAP_COLORS_ST.keys()),
-                                range=list(CAP_COLORS_ST.values())
-                            ), legend=None),
-                            tooltip=["Market Cap", alt.Tooltip("% to NAV:Q", format=".1f")]
-                        ).properties(height=120)
-                        st.altair_chart(cap_chart, use_container_width=True)
+                    st.markdown("**Market Cap Breakdown**")
+                    cap_chart = alt.Chart(cap_grp).mark_bar(cornerRadiusEnd=4).encode(
+                        x=alt.X("% to NAV:Q", title="% to NAV"),
+                        y=alt.Y("Market Cap:N", sort="-x", title=""),
+                        color=alt.Color("Market Cap:N", scale=alt.Scale(
+                            domain=list(CAP_COLORS_ST.keys()),
+                            range=list(CAP_COLORS_ST.values())
+                        ), legend=None),
+                        tooltip=["Market Cap", alt.Tooltip("% to NAV:Q", format=".1f")]
+                    ).properties(height=180)
+                    st.altair_chart(cap_chart, use_container_width=True)
 
-                    with col_b:
-                        st.markdown("**Top Sectors**")
-                        sec_grp = eq_only.groupby("industry_sector")["pct_to_nav"].sum().reset_index()
-                        sec_grp.columns = ["Sector", "% to NAV"]
-                        sec_grp = sec_grp.sort_values("% to NAV", ascending=False).head(8)
-                        sec_chart = alt.Chart(sec_grp).mark_bar(cornerRadiusEnd=4, color="#4ade80").encode(
-                            x=alt.X("% to NAV:Q", title="% to NAV"),
-                            y=alt.Y("Sector:N", sort="-x", title=""),
-                            tooltip=["Sector", alt.Tooltip("% to NAV:Q", format=".1f")]
-                        ).properties(height=200)
-                        st.altair_chart(sec_chart, use_container_width=True)
+                    st.markdown("**Top Sectors**")
+                    sec_grp = eq_only.groupby("industry_sector")["pct_to_nav"].sum().reset_index()
+                    sec_grp.columns = ["Sector", "% to NAV"]
+                    sec_grp = sec_grp.sort_values("% to NAV", ascending=False).head(8)
+                    sec_chart = alt.Chart(sec_grp).mark_bar(cornerRadiusEnd=4, color="#4ade80").encode(
+                        x=alt.X("% to NAV:Q", title="% to NAV"),
+                        y=alt.Y("Sector:N", sort="-x", title=""),
+                        tooltip=["Sector", alt.Tooltip("% to NAV:Q", format=".1f")]
+                    ).properties(height=260)
+                    st.altair_chart(sec_chart, use_container_width=True)
 
                 # Holdings table
                 st.markdown("**Holdings**")
